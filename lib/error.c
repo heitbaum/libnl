@@ -3,7 +3,8 @@
  * Copyright (c) 2008 Thomas Graf <tgraf@suug.ch>
  */
 
-#include <netlink-private/netlink.h>
+#include "nl-default.h"
+
 #include <netlink/netlink.h>
 
 static const char *errmsg[NLE_MAX+1] = {
@@ -42,6 +43,8 @@ static const char *errmsg[NLE_MAX+1] = {
 [NLE_IMMUTABLE]		= "Immutable attribute",
 [NLE_DUMP_INTR]		= "Dump inconsistency detected, interrupted",
 [NLE_ATTRSIZE]		= "Attribute max length exceeded",
+[NLE_HOSTUNREACH]	= "Host is unreachable",
+[NLE_NETDOWN]		= "Network is down",
 };
 
 /**
@@ -103,9 +106,23 @@ int nl_syserr2nlerr(int error)
 	case EBUSY:		return NLE_BUSY;
 	case ERANGE:		return NLE_RANGE;
 	case ENODEV:		return NLE_NODEV;
+
+	/* Historically, NLE_HOSTUNREACH and NLE_NETDOWN did not exit (it was
+	 * all NLE_FAILURE). Introducing a new error code later on was an API
+	 * change, which caused problems:
+	 *
+	 *   https://github.com/thom311/libnl/pull/433#issuecomment-3625794675
+	 *
+	 * For now, this change is undone by still map EHOSTUNREACH/ENETDOWN
+	 * to NLE_FAILURE.
+	 *
+	 * We should bring the change back in the future, but do it somehow(?)
+	 * smart to not break existing users. */
+	case EHOSTUNREACH:	return NLE_FAILURE;
+	case ENETDOWN:		return NLE_FAILURE;
+
 	default:		return NLE_FAILURE;
 	}
 }
 
 /** @} */
-

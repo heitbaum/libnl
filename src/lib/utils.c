@@ -15,14 +15,14 @@
  * accordingly via nl_cli_fatal().
  */
 
-#include <netlink/cli/utils.h>
+#include "nl-default.h"
+
 #include <locale.h>
-
-#include "lib/defs.h"
-
 #ifdef HAVE_DLFCN_H
 #include <dlfcn.h>
 #endif
+
+#include <netlink/cli/utils.h>
 
 /**
  * Parse a text based 32 bit unsigned integer argument
@@ -223,16 +223,19 @@ void nl_cli_load_module(const char *prefix, const char *name)
 	char path[FILENAME_MAX+1];
 
 	snprintf(path, sizeof(path), "%s/%s/%s.so",
-		 PKGLIBDIR, prefix, name);
+		 _NL_PKGLIBDIR, prefix, name);
 
 #ifdef HAVE_DLFCN_H
 	{
 		void *handle;
 
-		if (!(handle = dlopen(path, RTLD_NOW))) {
+		handle = dlopen(path, RTLD_NOW);
+		if (!handle) {
 			nl_cli_fatal(ENOENT, "Unable to load module \"%s\": %s\n",
 			             path, dlerror());
 		}
+		/* We intentionally leak the dlopen handle. */
+		/* coverity[RESOURCE_LEAK] */
 	}
 #else
 	nl_cli_fatal(ENOTSUP, "Unable to load module \"%s\": built without dynamic libraries support\n",

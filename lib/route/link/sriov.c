@@ -19,17 +19,38 @@
  * @{
  */
 
-#include <netlink-private/netlink.h>
-#include <netlink-private/route/link/api.h>
-#include <netlink/netlink.h>
-#include <netlink/route/link.h>
+#include "nl-default.h"
 
 #include <linux/if_ether.h>
 #include <linux/if_link.h>
-#include <netlink-private/route/link/sriov.h>
+
+#include <netlink/netlink.h>
+#include <netlink/route/link.h>
 #include <netlink/route/link/sriov.h>
 
+#include "nl-route.h"
+#include "link-sriov.h"
+#include "link-api.h"
+
 /** @cond SKIP */
+struct rtnl_link_vf {
+	struct nl_list_head vf_list;
+	int ce_refcnt;
+	uint32_t ce_mask;
+	uint32_t vf_index;
+	uint64_t vf_guid_node;
+	uint64_t vf_guid_port;
+	uint32_t vf_linkstate;
+	struct nl_addr *vf_lladdr;
+	uint32_t vf_max_tx_rate;
+	uint32_t vf_min_tx_rate;
+	uint32_t vf_rate;
+	uint32_t vf_rss_query_en;
+	uint32_t vf_spoofchk;
+	uint64_t vf_stats[RTNL_LINK_VF_STATS_MAX + 1];
+	uint32_t vf_trust;
+	struct nl_vf_vlans *vf_vlans;
+};
 
 #define SRIOVON "on"
 #define SRIOVOFF "off"
@@ -86,7 +107,7 @@ int rtnl_link_sriov_clone(struct rtnl_link *dst, struct rtnl_link *src) {
 	nl_vf_vlans_t *src_vlans = NULL, *dst_vlans = NULL;
 	nl_vf_vlan_info_t *src_vlan_info = NULL, *dst_vlan_info = NULL;
 
-	if (!(err = rtnl_link_has_vf_list(src)))
+	if (!rtnl_link_has_vf_list(src))
 		return 0;
 
 	dst->l_vf_list = rtnl_link_vf_alloc();
@@ -123,7 +144,7 @@ int rtnl_link_sriov_clone(struct rtnl_link *dst, struct rtnl_link *src) {
 			dst_vlan_info = dst_vlans->vlans;
 			memcpy(dst_vlans, src_vlans, sizeof(nl_vf_vlans_t));
 			memcpy(dst_vlan_info, src_vlan_info,
-			       dst_vlans->size * sizeof(dst_vlan_info));
+			       dst_vlans->size * sizeof(*dst_vlan_info));
 			d_vf->vf_vlans = dst_vlans;
 		}
 
@@ -207,10 +228,9 @@ static void dump_vf_details(struct rtnl_link_vf *vf_data,
 /* Loop through SRIOV VF list dump details */
 void rtnl_link_sriov_dump_details(struct rtnl_link *link,
 				  struct nl_dump_params *p) {
-	int err;
 	struct rtnl_link_vf *vf_data, *list, *next;
 
-	if (!(err = rtnl_link_has_vf_list(link)))
+	if (!rtnl_link_has_vf_list(link))
 		BUG();
 
 	nl_dump(p, "    SRIOV VF List\n");
@@ -229,7 +249,7 @@ static void dump_vf_stats(struct rtnl_link_vf *vf_data,
 	char *unit;
 	float res;
 
-	nl_dump(p, "    VF %" PRIu64 " Stats:\n", vf_data->vf_index);
+	nl_dump(p, "    VF %u Stats:\n", vf_data->vf_index);
 	nl_dump_line(p, "\tRX:    %-14s %-10s   %-10s %-10s\n",
 		     "bytes", "packets", "multicast", "broadcast");
 
@@ -271,10 +291,9 @@ void rtnl_link_sriov_dump_stats(struct rtnl_link *link,
 
 /* Free stored SRIOV VF data */
 void rtnl_link_sriov_free_data(struct rtnl_link *link) {
-	int err = 0;
 	struct rtnl_link_vf *list, *vf, *next;
 
-	if (!(err = rtnl_link_has_vf_list(link)))
+	if (!rtnl_link_has_vf_list(link))
 		return;
 
 	list = link->l_vf_list;
@@ -614,7 +633,7 @@ int rtnl_link_sriov_parse_vflist(struct rtnl_link *link, struct nlattr **tb) {
 		if (t[IFLA_VF_SPOOFCHK]) {
 			vf_spoofchk = nla_data(t[IFLA_VF_SPOOFCHK]);
 
-			if (vf_spoofchk->setting != -1) {
+			if (vf_spoofchk->setting != ((uint32_t)-1)) {
 				vf_data->vf_spoofchk = vf_spoofchk->setting ? 1 : 0;
 				vf_data->ce_mask |= SRIOV_ATTR_SPOOFCHK;
 			}
@@ -643,14 +662,14 @@ int rtnl_link_sriov_parse_vflist(struct rtnl_link *link, struct nlattr **tb) {
 		if (t[IFLA_VF_RSS_QUERY_EN]) {
 			vf_rss_query = nla_data(t[IFLA_VF_RSS_QUERY_EN]);
 
-			if (vf_rss_query->setting != -1) {
+			if (vf_rss_query->setting != ((uint32_t)-1)) {
 				vf_data->vf_rss_query_en = vf_rss_query->setting ? 1 : 0;
 				vf_data->ce_mask |= SRIOV_ATTR_RSS_QUERY_EN;
 			}
 		}
 
 		if (t[IFLA_VF_STATS]) {
-			err = nla_parse_nested(stb, IFLA_VF_STATS_MAX,
+			err = nla_parse_nested(stb, RTNL_LINK_VF_STATS_MAX,
 					       t[IFLA_VF_STATS],
 					       sriov_stats_policy);
 			if (err < 0) {
@@ -677,13 +696,13 @@ int rtnl_link_sriov_parse_vflist(struct rtnl_link *link, struct nlattr **tb) {
 				    RTNL_LINK_VF_STATS_MULTICAST,
 				    IFLA_VF_STATS_MULTICAST);
 
-			vf_data->ce_mask |= IFLA_VF_STATS;
+			vf_data->ce_mask |= SRIOV_ATTR_STATS;
 		}
 
 		if (t[IFLA_VF_TRUST]) {
 			vf_trust = nla_data(t[IFLA_VF_TRUST]);
 
-			if (vf_trust->setting != -1) {
+			if (vf_trust->setting != ((uint32_t)-1)) {
 				vf_data->vf_trust = vf_trust->setting ? 1 : 0;
 				vf_data->ce_mask |= SRIOV_ATTR_TRUST;
 			}

@@ -9,18 +9,30 @@
  * @{
  */
 
-#include <netlink-private/netlink.h>
-#include <netlink-private/tc.h>
+#include "nl-default.h"
+
 #include <netlink/netlink.h>
 #include <netlink/cache.h>
 #include <netlink/utils.h>
-#include <netlink-private/route/tc-api.h>
 #include <netlink/route/qdisc.h>
 #include <netlink/route/class.h>
 #include <netlink/route/link.h>
 #include <netlink/route/qdisc/tbf.h>
 
+#include "tc-api.h"
+
 /** @cond SKIP */
+struct rtnl_tbf {
+	uint32_t qt_limit;
+	struct rtnl_ratespec qt_rate;
+	uint32_t qt_rate_bucket;
+	uint32_t qt_rate_txtime;
+	struct rtnl_ratespec qt_peakrate;
+	uint32_t qt_peakrate_bucket;
+	uint32_t qt_peakrate_txtime;
+	uint32_t qt_mask;
+};
+
 #define TBF_ATTR_LIMIT			0x01
 #define TBF_ATTR_RATE			0x02
 #define TBF_ATTR_PEAKRATE		0x10
@@ -115,9 +127,9 @@ static void tbf_dump_details(struct rtnl_tc *tc, void *data,
 		cl = nl_cancel_down_bits(1 << tbf->qt_peakrate.rs_cell_log,
 					 &clu);
 
-		nl_dump_line(p, "    peak-rate %.2f%s/s (%.0f%s) "
-				"bucket-size %.1f%s cell-size %.1f%s"
-				"latency %.1f%s",
+		nl_dump_line(p,
+			     "    peak-rate %.2f%s/s (%.0f%s) "
+			     "bucket-size %.1f%s cell-size %.1f%s",
 			     pr, pru, prb, prbu, bs, bsu, cl, clu);
 	}
 }
@@ -127,9 +139,9 @@ static int tbf_msg_fill(struct rtnl_tc *tc, void *data, struct nl_msg *msg)
 	uint32_t rtab[RTNL_TC_RTABLE_SIZE], ptab[RTNL_TC_RTABLE_SIZE];
 	struct tc_tbf_qopt opts;
 	struct rtnl_tbf *tbf = data;
-	int required = TBF_ATTR_RATE | TBF_ATTR_LIMIT;
+	const uint32_t REQUIRED = TBF_ATTR_RATE | TBF_ATTR_LIMIT;
 
-	if ((tbf->qt_mask & required) != required)
+	if ((tbf->qt_mask & REQUIRED) != REQUIRED)
 		return -NLE_MISSING_ATTR;
 
 	memset(&opts, 0, sizeof(opts));
@@ -441,12 +453,12 @@ static struct rtnl_tc_ops tbf_tc_ops = {
 	.to_msg_fill		= tbf_msg_fill,
 };
 
-static void __init tbf_init(void)
+static void _nl_init tbf_init(void)
 {
 	rtnl_tc_register(&tbf_tc_ops);
 }
 
-static void __exit tbf_exit(void)
+static void _nl_exit tbf_exit(void)
 {
 	rtnl_tc_unregister(&tbf_tc_ops);
 }

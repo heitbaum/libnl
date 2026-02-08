@@ -9,6 +9,8 @@
  * @{
  */
 
+#include "nl-default.h"
+
 #include <netlink/cli/utils.h>
 #include <netlink/cli/cls.h>
 #include <netlink/route/cls/ematch.h>
@@ -48,16 +50,13 @@ void nl_cli_cls_parse_proto(struct rtnl_cls *cls, char *arg)
 
 struct rtnl_ematch_tree *nl_cli_cls_parse_ematch(struct rtnl_cls *cls, char *arg)
 {
+	_nl_auto_free char *errstr = NULL;
 	struct rtnl_ematch_tree *tree;
-	char *errstr = NULL;
 	int err;
 
 	if ((err = rtnl_ematch_parse_expr(arg, &errstr, &tree)) < 0)
 		nl_cli_fatal(err, "Unable to parse ematch expression: %s",
 				  errstr);
-	
-	if (errstr)
-		free(errstr);
 
 	return tree;
 }

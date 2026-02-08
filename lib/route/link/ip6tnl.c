@@ -16,51 +16,59 @@
  * @{
  */
 
-#include <netlink-private/netlink.h>
+#include "nl-default.h"
+
+#include <linux/if_tunnel.h>
+
 #include <netlink/netlink.h>
 #include <netlink/attr.h>
 #include <netlink/utils.h>
 #include <netlink/object.h>
 #include <netlink/route/rtnl.h>
 #include <netlink/route/link/ip6tnl.h>
-#include <netlink-private/route/link/api.h>
-#include <linux/if_tunnel.h>
-#include <netinet/in.h>
 
-#define IP6_TNL_ATTR_LINK          (1 << 0)
-#define IP6_TNL_ATTR_LOCAL         (1 << 1)
-#define IP6_TNL_ATTR_REMOTE        (1 << 2)
-#define IP6_TNL_ATTR_TTL           (1 << 3)
-#define IP6_TNL_ATTR_TOS           (1 << 4)
-#define IP6_TNL_ATTR_ENCAPLIMIT    (1 << 5)
-#define IP6_TNL_ATTR_FLAGS         (1 << 6)
-#define IP6_TNL_ATTR_PROTO         (1 << 7)
-#define IP6_TNL_ATTR_FLOWINFO      (1 << 8)
+#include "nl-route.h"
+#include "link-api.h"
+#include "nl-aux-route/nl-route.h"
 
-struct ip6_tnl_info
-{
-	uint8_t                 ttl;
-	uint8_t                 tos;
-	uint8_t                 encap_limit;
-	uint8_t                 proto;
-	uint32_t                flags;
-	uint32_t                link;
-	uint32_t                flowinfo;
-	struct in6_addr         local;
-	struct in6_addr         remote;
-	uint32_t                ip6_tnl_mask;
+#define IP6_TNL_ATTR_LINK (1 << 0)
+#define IP6_TNL_ATTR_LOCAL (1 << 1)
+#define IP6_TNL_ATTR_REMOTE (1 << 2)
+#define IP6_TNL_ATTR_TTL (1 << 3)
+#define IP6_TNL_ATTR_TOS (1 << 4)
+#define IP6_TNL_ATTR_ENCAPLIMIT (1 << 5)
+#define IP6_TNL_ATTR_FLAGS (1 << 6)
+#define IP6_TNL_ATTR_PROTO (1 << 7)
+#define IP6_TNL_ATTR_FLOWINFO (1 << 8)
+#define IP6_TNL_ATTR_FWMARK (1 << 9)
+#define IP6_TNL_ATTR_CMTD (1 << 10)
+
+struct ip6_tnl_info {
+	uint8_t ttl;
+	uint8_t tos;
+	uint8_t encap_limit;
+	uint8_t proto;
+	uint32_t flags;
+	uint32_t link;
+	uint32_t flowinfo;
+	struct in6_addr local;
+	struct in6_addr remote;
+	uint32_t fwmark;
+	uint32_t ip6_tnl_mask;
 };
 
 static struct nla_policy ip6_tnl_policy[IFLA_IPTUN_MAX + 1] = {
-	[IFLA_IPTUN_LINK]         = { .type = NLA_U32 },
-	[IFLA_IPTUN_LOCAL]        = { .minlen = sizeof(struct in6_addr) },
-	[IFLA_IPTUN_REMOTE]       = { .minlen = sizeof(struct in6_addr) },
-	[IFLA_IPTUN_TTL]          = { .type = NLA_U8 },
-	[IFLA_IPTUN_TOS]          = { .type = NLA_U8 },
-	[IFLA_IPTUN_ENCAP_LIMIT]  = { .type = NLA_U8 },
-	[IFLA_IPTUN_FLOWINFO]     = { .type = NLA_U32 },
-	[IFLA_IPTUN_FLAGS]        = { .type = NLA_U32 },
-	[IFLA_IPTUN_PROTO]        = { .type = NLA_U8 },
+	[IFLA_IPTUN_LINK] = { .type = NLA_U32 },
+	[IFLA_IPTUN_LOCAL] = { .minlen = sizeof(struct in6_addr) },
+	[IFLA_IPTUN_REMOTE] = { .minlen = sizeof(struct in6_addr) },
+	[IFLA_IPTUN_TTL] = { .type = NLA_U8 },
+	[IFLA_IPTUN_TOS] = { .type = NLA_U8 },
+	[IFLA_IPTUN_ENCAP_LIMIT] = { .type = NLA_U8 },
+	[IFLA_IPTUN_FLOWINFO] = { .type = NLA_U32 },
+	[IFLA_IPTUN_FLAGS] = { .type = NLA_U32 },
+	[IFLA_IPTUN_PROTO] = { .type = NLA_U8 },
+	[IFLA_IPTUN_FWMARK] = { .type = NLA_U32 },
+	[IFLA_IPTUN_COLLECT_METADATA] = { .type = NLA_FLAG },
 };
 
 static int ip6_tnl_alloc(struct rtnl_link *link)
@@ -105,12 +113,14 @@ static int ip6_tnl_parse(struct rtnl_link *link, struct nlattr *data,
 	}
 
 	if (tb[IFLA_IPTUN_LOCAL]) {
-		nla_memcpy(&ip6_tnl->local, tb[IFLA_IPTUN_LOCAL], sizeof(struct in6_addr));
+		nla_memcpy(&ip6_tnl->local, tb[IFLA_IPTUN_LOCAL],
+			   sizeof(struct in6_addr));
 		ip6_tnl->ip6_tnl_mask |= IP6_TNL_ATTR_LOCAL;
 	}
 
 	if (tb[IFLA_IPTUN_REMOTE]) {
-		nla_memcpy(&ip6_tnl->remote, tb[IFLA_IPTUN_REMOTE], sizeof(struct in6_addr));
+		nla_memcpy(&ip6_tnl->remote, tb[IFLA_IPTUN_REMOTE],
+			   sizeof(struct in6_addr));
 		ip6_tnl->ip6_tnl_mask |= IP6_TNL_ATTR_REMOTE;
 	}
 
@@ -144,6 +154,14 @@ static int ip6_tnl_parse(struct rtnl_link *link, struct nlattr *data,
 		ip6_tnl->ip6_tnl_mask |= IP6_TNL_ATTR_PROTO;
 	}
 
+	if (tb[IFLA_IPTUN_FWMARK]) {
+		ip6_tnl->fwmark = nla_get_u32(tb[IFLA_IPTUN_FWMARK]);
+		ip6_tnl->ip6_tnl_mask |= IP6_TNL_ATTR_FWMARK;
+	}
+
+	if (tb[IFLA_IPTUN_COLLECT_METADATA])
+		ip6_tnl->ip6_tnl_mask |= IP6_TNL_ATTR_CMTD;
+
 	err = 0;
 
 errout:
@@ -163,10 +181,12 @@ static int ip6_tnl_put_attrs(struct nl_msg *msg, struct rtnl_link *link)
 		NLA_PUT_U32(msg, IFLA_IPTUN_LINK, ip6_tnl->link);
 
 	if (ip6_tnl->ip6_tnl_mask & IP6_TNL_ATTR_LOCAL)
-		NLA_PUT(msg, IFLA_IPTUN_LOCAL, sizeof(struct in6_addr), &ip6_tnl->local);
+		NLA_PUT(msg, IFLA_IPTUN_LOCAL, sizeof(struct in6_addr),
+			&ip6_tnl->local);
 
 	if (ip6_tnl->ip6_tnl_mask & IP6_TNL_ATTR_REMOTE)
-		NLA_PUT(msg, IFLA_IPTUN_REMOTE, sizeof(struct in6_addr), &ip6_tnl->remote);
+		NLA_PUT(msg, IFLA_IPTUN_REMOTE, sizeof(struct in6_addr),
+			&ip6_tnl->remote);
 
 	if (ip6_tnl->ip6_tnl_mask & IP6_TNL_ATTR_TTL)
 		NLA_PUT_U8(msg, IFLA_IPTUN_TTL, ip6_tnl->ttl);
@@ -189,6 +209,12 @@ static int ip6_tnl_put_attrs(struct nl_msg *msg, struct rtnl_link *link)
 	else
 		NLA_PUT_U8(msg, IFLA_IPTUN_PROTO, 0);
 
+	if (ip6_tnl->ip6_tnl_mask & IP6_TNL_ATTR_FWMARK)
+		NLA_PUT_U32(msg, IFLA_IPTUN_FWMARK, ip6_tnl->fwmark);
+
+	if (ip6_tnl->ip6_tnl_mask & IP6_TNL_ATTR_CMTD)
+		NLA_PUT_FLAG(msg, IFLA_IPTUN_COLLECT_METADATA);
+
 	nla_nest_end(msg, data);
 
 nla_put_failure:
@@ -208,13 +234,16 @@ static void ip6_tnl_dump_line(struct rtnl_link *link, struct nl_dump_params *p)
 	nl_dump(p, "ip6_tnl : %s", link->l_name);
 }
 
-static void ip6_tnl_dump_details(struct rtnl_link *link, struct nl_dump_params *p)
+static void ip6_tnl_dump_details(struct rtnl_link *link,
+				 struct nl_dump_params *p)
 {
 	struct ip6_tnl_info *ip6_tnl = link->l_info;
-	char *name, addr[INET6_ADDRSTRLEN];
-	struct rtnl_link *parent;
+	char addr[INET6_ADDRSTRLEN];
 
 	if (ip6_tnl->ip6_tnl_mask & IP6_TNL_ATTR_LINK) {
+		_nl_auto_rtnl_link struct rtnl_link *parent = NULL;
+		char *name;
+
 		nl_dump(p, "      link ");
 
 		name = NULL;
@@ -230,20 +259,14 @@ static void ip6_tnl_dump_details(struct rtnl_link *link, struct nl_dump_params *
 
 	if (ip6_tnl->ip6_tnl_mask & IP6_TNL_ATTR_LOCAL) {
 		nl_dump(p, "      local ");
-
-		if(inet_ntop(AF_INET6, &ip6_tnl->local, addr, INET6_ADDRSTRLEN))
-			nl_dump_line(p, "%s\n", addr);
-		else
-			nl_dump_line(p, "%#x\n", ip6_tnl->local);
+		nl_dump_line(p, "%s\n",
+			     _nl_inet_ntop(AF_INET6, &ip6_tnl->local, addr));
 	}
 
 	if (ip6_tnl->ip6_tnl_mask & IP6_TNL_ATTR_REMOTE) {
 		nl_dump(p, "      remote ");
-
-		if(inet_ntop(AF_INET6, &ip6_tnl->remote, addr, INET6_ADDRSTRLEN))
-			nl_dump_line(p, "%s\n", addr);
-		else
-			nl_dump_line(p, "%#x\n", ip6_tnl->remote);
+		nl_dump_line(p, "%s\n",
+			     _nl_inet_ntop(AF_INET6, &ip6_tnl->remote, addr));
 	}
 
 	if (ip6_tnl->ip6_tnl_mask & IP6_TNL_ATTR_TTL) {
@@ -274,6 +297,15 @@ static void ip6_tnl_dump_details(struct rtnl_link *link, struct nl_dump_params *
 	if (ip6_tnl->ip6_tnl_mask & IP6_TNL_ATTR_PROTO) {
 		nl_dump(p, "    proto   ");
 		nl_dump_line(p, " (%x)\n", ip6_tnl->proto);
+	}
+
+	if (ip6_tnl->ip6_tnl_mask & IP6_TNL_ATTR_FWMARK) {
+		nl_dump(p, "      fwmark ");
+		nl_dump_line(p, "%x\n", ip6_tnl->fwmark);
+	}
+
+	if (ip6_tnl->ip6_tnl_mask & IP6_TNL_ATTR_CMTD) {
+		nl_dump(p, "      collect-metadata\n");
 	}
 }
 
@@ -311,10 +343,10 @@ static struct rtnl_link_info_ops ip6_tnl_info_ops = {
 	.io_free                = ip6_tnl_free,
 };
 
-#define IS_IP6_TNL_LINK_ASSERT(link)\
-	if ((link)->l_info_ops != &ip6_tnl_info_ops) {\
-		APPBUG("Link is not a ip6_tnl link. set type \"ip6tnl\" first.");\
-		return -NLE_OPNOTSUPP;\
+#define IS_IP6_TNL_LINK_ASSERT(link)                                              \
+	if ((link)->l_info_ops != &ip6_tnl_info_ops) {                            \
+		APPBUG("Link is not a ip6_tnl link. set type \"ip6tnl\" first."); \
+		return -NLE_OPNOTSUPP;                                            \
 	}
 
 struct rtnl_link *rtnl_link_ip6_tnl_alloc(void)
@@ -363,7 +395,7 @@ int rtnl_link_ip6_tnl_add(struct nl_sock *sk, const char *name)
 	if (!link)
 		return -NLE_NOMEM;
 
-	if(name)
+	if (name)
 		rtnl_link_set_name(link, name);
 
 	err = rtnl_link_add(sk, link, NLM_F_CREATE);
@@ -553,7 +585,8 @@ uint8_t rtnl_link_ip6_tnl_get_tos(struct rtnl_link *link)
  *
  * @return 0 on success or a negative error code
  */
-int rtnl_link_ip6_tnl_set_encaplimit(struct rtnl_link *link, uint8_t encap_limit)
+int rtnl_link_ip6_tnl_set_encaplimit(struct rtnl_link *link,
+				     uint8_t encap_limit)
 {
 	struct ip6_tnl_info *ip6_tnl = link->l_info;
 
@@ -649,6 +682,51 @@ uint32_t rtnl_link_ip6_tnl_get_flags(struct rtnl_link *link)
 }
 
 /**
+ * Set IP6_TNL collect-metadata flag
+ * @arg link            Link object
+ * @arg enable          0 to disable, non-zero to enable
+ *
+ * Enable or disable the collect-metadata mode on the ip6tnl link.
+ *
+ * @return 0 on success or a negative error code
+ */
+int rtnl_link_ip6_tnl_set_collect_metadata(struct rtnl_link *link, int enable)
+{
+	struct ip6_tnl_info *ip6_tnl = link->l_info;
+
+	IS_IP6_TNL_LINK_ASSERT(link);
+
+	if (enable)
+		ip6_tnl->ip6_tnl_mask |= IP6_TNL_ATTR_CMTD;
+	else
+		ip6_tnl->ip6_tnl_mask &= ~IP6_TNL_ATTR_CMTD;
+
+	return 0;
+}
+
+/**
+ * Get IP6_TNL collect-metadata flag
+ * @arg link            Link object
+ * @arg enable          Pointer to int which will be set to the current state
+ *                      (0 if disabled, non-zero if enabled)
+ *
+ * @return 0 on success or a negative error code
+ */
+int rtnl_link_ip6_tnl_get_collect_metadata(struct rtnl_link *link, int *enable)
+{
+	struct ip6_tnl_info *ip6_tnl = link->l_info;
+
+	IS_IP6_TNL_LINK_ASSERT(link);
+
+	if (!enable)
+		return -NLE_INVAL;
+
+	*enable = !!(ip6_tnl->ip6_tnl_mask & IP6_TNL_ATTR_CMTD);
+
+	return 0;
+}
+
+/**
  * Set IP6_TNL tunnel proto
  * @arg link            Link object
  * @arg proto           tunnel proto
@@ -682,12 +760,52 @@ uint8_t rtnl_link_ip6_tnl_get_proto(struct rtnl_link *link)
 	return ip6_tnl->proto;
 }
 
-static void __init ip6_tnl_init(void)
+/**
+ * Set IP6_TNL tunnel fwmark
+ * @arg link            Link object
+ * @arg fwmark          fwmark
+ *
+ * @return 0 on success or a negative error code
+ */
+int rtnl_link_ip6_tnl_set_fwmark(struct rtnl_link *link, uint32_t fwmark)
+{
+	struct ip6_tnl_info *ip6_tnl = link->l_info;
+
+	IS_IP6_TNL_LINK_ASSERT(link);
+
+	ip6_tnl->fwmark = fwmark;
+	ip6_tnl->ip6_tnl_mask |= IP6_TNL_ATTR_FWMARK;
+
+	return 0;
+}
+
+/**
+ * Get IP6_TNL tunnel fwmark
+ * @arg link            Link object
+ * @arg fwmark          addr to fill in with the fwmark
+ *
+ * @return 0 on success or a negative error code
+ */
+int rtnl_link_ip6_tnl_get_fwmark(struct rtnl_link *link, uint32_t *fwmark)
+{
+	struct ip6_tnl_info *ip6_tnl = link->l_info;
+
+	IS_IP6_TNL_LINK_ASSERT(link);
+
+	if (!(ip6_tnl->ip6_tnl_mask & IP6_TNL_ATTR_FWMARK))
+		return -NLE_NOATTR;
+
+	*fwmark = ip6_tnl->fwmark;
+
+	return 0;
+}
+
+static void _nl_init ip6_tnl_init(void)
 {
 	rtnl_link_register_info(&ip6_tnl_info_ops);
 }
 
-static void __exit ip6_tnl_exit(void)
+static void _nl_exit ip6_tnl_exit(void)
 {
 	rtnl_link_unregister_info(&ip6_tnl_info_ops);
 }

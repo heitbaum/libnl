@@ -39,18 +39,97 @@
  * @brief
  */
 
-#include <netlink-private/netlink.h>
+#include "nl-default.h"
+
+#include <time.h>
+
 #include <netlink/netlink.h>
 #include <netlink/cache.h>
 #include <netlink/object.h>
 #include <netlink/xfrm/sa.h>
 #include <netlink/xfrm/selector.h>
 #include <netlink/xfrm/lifetime.h>
-#include <time.h>
 
-#include "netlink-private/utils.h"
+#include "nl-xfrm.h"
+#include "nl-priv-dynamic-core/object-api.h"
+#include "nl-priv-dynamic-core/nl-core.h"
+#include "nl-priv-dynamic-core/cache-api.h"
+#include "nl-aux-core/nl-core.h"
+#include "nl-aux-xfrm/nl-xfrm.h"
 
 /** @cond SKIP */
+
+struct xfrmnl_stats {
+	uint32_t        replay_window;
+	uint32_t        replay;
+	uint32_t        integrity_failed;
+};
+
+struct xfrmnl_algo_aead {
+	char            alg_name[64];
+	uint32_t        alg_key_len;    /* in bits */
+	uint32_t        alg_icv_len;    /* in bits */
+	char            alg_key[0];
+};
+
+struct xfrmnl_algo_auth {
+	char            alg_name[64];
+	uint32_t        alg_key_len;    /* in bits */
+	uint32_t        alg_trunc_len;  /* in bits */
+	char            alg_key[0];
+};
+
+struct xfrmnl_algo {
+	char            alg_name[64];
+	uint32_t        alg_key_len;    /* in bits */
+	char            alg_key[0];
+};
+
+struct xfrmnl_encap_tmpl {
+	uint16_t        encap_type;
+	uint16_t        encap_sport;
+	uint16_t        encap_dport;
+	struct nl_addr* encap_oa;
+};
+
+struct xfrmnl_user_offload {
+	int             ifindex;
+	uint8_t         flags;
+};
+
+struct xfrmnl_sa {
+	NLHDR_COMMON
+
+	struct xfrmnl_sel*              sel;
+	struct xfrmnl_id                id;
+	struct nl_addr*                 saddr;
+	struct xfrmnl_ltime_cfg*        lft;
+	struct xfrmnl_lifetime_cur      curlft;
+	struct xfrmnl_stats             stats;
+	uint32_t                        seq;
+	uint32_t                        reqid;
+	uint16_t                        family;
+	uint32_t                        if_id;
+	uint8_t                         mode;        /* XFRM_MODE_xxx */
+	uint8_t                         replay_window;
+	uint8_t                         flags;
+	struct xfrmnl_algo_aead*        aead;
+	struct xfrmnl_algo_auth*        auth;
+	struct xfrmnl_algo*             crypt;
+	struct xfrmnl_algo*             comp;
+	struct xfrmnl_encap_tmpl*       encap;
+	uint32_t                        tfcpad;
+	struct nl_addr*                 coaddr;
+	struct xfrmnl_mark              mark;
+	struct xfrmnl_user_sec_ctx*     sec_ctx;
+	uint32_t                        replay_maxage;
+	uint32_t                        replay_maxdiff;
+	struct xfrmnl_replay_state      replay_state;
+	struct xfrmnl_replay_state_esn* replay_state_esn;
+	uint8_t                         hard;
+	struct xfrmnl_user_offload*     user_offload;
+};
+
 #define XFRM_SA_ATTR_SEL            0x01
 #define XFRM_SA_ATTR_DADDR          0x02
 #define XFRM_SA_ATTR_SPI            0x04
@@ -78,6 +157,8 @@
 #define XFRM_SA_ATTR_REPLAY_MAXDIFF 0x1000000
 #define XFRM_SA_ATTR_REPLAY_STATE   0x2000000
 #define XFRM_SA_ATTR_EXPIRE         0x4000000
+#define XFRM_SA_ATTR_OFFLOAD_DEV    0x8000000
+#define XFRM_SA_ATTR_IF_ID          0x10000000
 
 static struct nl_cache_ops  xfrmnl_sa_ops;
 static struct nl_object_ops xfrm_sa_obj_ops;
@@ -125,6 +206,8 @@ static void xfrm_sa_free_data(struct nl_object *c)
 		free (sa->sec_ctx);
 	if (sa->replay_state_esn)
 		free (sa->replay_state_esn);
+	if (sa->user_offload)
+		free(sa->user_offload);
 }
 
 static int xfrm_sa_clone(struct nl_object *_dst, struct nl_object *_src)
@@ -132,6 +215,20 @@ static int xfrm_sa_clone(struct nl_object *_dst, struct nl_object *_src)
 	struct xfrmnl_sa*   dst = nl_object_priv(_dst);
 	struct xfrmnl_sa*   src = nl_object_priv(_src);
 	uint32_t            len = 0;
+
+	dst->sel = NULL;
+	dst->id.daddr = NULL;
+	dst->saddr = NULL;
+	dst->lft = NULL;
+	dst->aead = NULL;
+	dst->auth = NULL;
+	dst->crypt = NULL;
+	dst->comp = NULL;
+	dst->encap = NULL;
+	dst->coaddr = NULL;
+	dst->sec_ctx = NULL;
+	dst->replay_state_esn = NULL;
+	dst->user_offload = NULL;
 
 	if (src->sel)
 		if ((dst->sel = xfrmnl_sel_clone (src->sel)) == NULL)
@@ -149,40 +246,35 @@ static int xfrm_sa_clone(struct nl_object *_dst, struct nl_object *_src)
 		if ((dst->saddr = nl_addr_clone (src->saddr)) == NULL)
 			return -NLE_NOMEM;
 
-	if (src->aead)
-	{
+	if (src->aead) {
 		len = sizeof (struct xfrmnl_algo_aead) + ((src->aead->alg_key_len + 7) / 8);
 		if ((dst->aead = calloc (1, len)) == NULL)
 			return -NLE_NOMEM;
 		memcpy ((void *)dst->aead, (void *)src->aead, len);
 	}
 
-	if (src->auth)
-	{
+	if (src->auth) {
 		len = sizeof (struct xfrmnl_algo_auth) + ((src->auth->alg_key_len + 7) / 8);
 		if ((dst->auth = calloc (1, len)) == NULL)
 			return -NLE_NOMEM;
 		memcpy ((void *)dst->auth, (void *)src->auth, len);
 	}
 
-	if (src->crypt)
-	{
+	if (src->crypt) {
 		len = sizeof (struct xfrmnl_algo) + ((src->crypt->alg_key_len + 7) / 8);
 		if ((dst->crypt = calloc (1, len)) == NULL)
 			return -NLE_NOMEM;
 		memcpy ((void *)dst->crypt, (void *)src->crypt, len);
 	}
 
-	if (src->comp)
-	{
+	if (src->comp) {
 		len = sizeof (struct xfrmnl_algo) + ((src->comp->alg_key_len + 7) / 8);
 		if ((dst->comp = calloc (1, len)) == NULL)
 			return -NLE_NOMEM;
 		memcpy ((void *)dst->comp, (void *)src->comp, len);
 	}
 
-	if (src->encap)
-	{
+	if (src->encap) {
 		len = sizeof (struct xfrmnl_encap_tmpl);
 		if ((dst->encap = calloc (1, len)) == NULL)
 			return -NLE_NOMEM;
@@ -193,20 +285,24 @@ static int xfrm_sa_clone(struct nl_object *_dst, struct nl_object *_src)
 		if ((dst->coaddr = nl_addr_clone (src->coaddr)) == NULL)
 			return -NLE_NOMEM;
 
-	if (src->sec_ctx)
-	{
+	if (src->sec_ctx) {
 		len = sizeof (*src->sec_ctx) + src->sec_ctx->ctx_len;
 		if ((dst->sec_ctx = calloc (1, len)) == NULL)
 			return -NLE_NOMEM;
 		memcpy ((void *)dst->sec_ctx, (void *)src->sec_ctx, len);
 	}
 
-	if (src->replay_state_esn)
-	{
+	if (src->replay_state_esn) {
 		len = sizeof (struct xfrmnl_replay_state_esn) + (src->replay_state_esn->bmp_len * sizeof (uint32_t));
 		if ((dst->replay_state_esn = calloc (1, len)) == NULL)
 			return -NLE_NOMEM;
 		memcpy ((void *)dst->replay_state_esn, (void *)src->replay_state_esn, len);
+	}
+
+	if (src->user_offload) {
+		dst->user_offload = _nl_memdup_ptr(src->user_offload);
+		if (!dst->user_offload)
+			return -NLE_NOMEM;
 	}
 
 	return 0;
@@ -220,51 +316,63 @@ static uint64_t xfrm_sa_compare(struct nl_object *_a, struct nl_object *_b,
 	uint64_t diff = 0;
 	int found = 0;
 
-#define XFRM_SA_DIFF(ATTR, EXPR) ATTR_DIFF(attrs, XFRM_SA_ATTR_##ATTR, a, b, EXPR)
-	diff |= XFRM_SA_DIFF(SEL,	xfrmnl_sel_cmp(a->sel, b->sel));
-	diff |= XFRM_SA_DIFF(DADDR,	nl_addr_cmp(a->id.daddr, b->id.daddr));
-	diff |= XFRM_SA_DIFF(SPI,	a->id.spi != b->id.spi);
-	diff |= XFRM_SA_DIFF(PROTO,	a->id.proto != b->id.proto);
-	diff |= XFRM_SA_DIFF(SADDR,	nl_addr_cmp(a->saddr, b->saddr));
-	diff |= XFRM_SA_DIFF(LTIME_CFG,	xfrmnl_ltime_cfg_cmp(a->lft, b->lft));
-	diff |= XFRM_SA_DIFF(REQID,	a->reqid != b->reqid);
-	diff |= XFRM_SA_DIFF(FAMILY,a->family != b->family);
-	diff |= XFRM_SA_DIFF(MODE,a->mode != b->mode);
-	diff |= XFRM_SA_DIFF(REPLAY_WIN,a->replay_window != b->replay_window);
-	diff |= XFRM_SA_DIFF(FLAGS,a->flags != b->flags);
-	diff |= XFRM_SA_DIFF(ALG_AEAD,(strcmp(a->aead->alg_name, b->aead->alg_name) ||
-	                              (a->aead->alg_key_len != b->aead->alg_key_len) ||
-	                              (a->aead->alg_icv_len != b->aead->alg_icv_len) ||
-	                              memcmp(a->aead->alg_key, b->aead->alg_key,
-	                              ((a->aead->alg_key_len + 7)/8))));
-	diff |= XFRM_SA_DIFF(ALG_AUTH,(strcmp(a->auth->alg_name, b->auth->alg_name) ||
-	                              (a->auth->alg_key_len != b->auth->alg_key_len) ||
-	                              (a->auth->alg_trunc_len != b->auth->alg_trunc_len) ||
-	                              memcmp(a->auth->alg_key, b->auth->alg_key,
-	                              ((a->auth->alg_key_len + 7)/8))));
-	diff |= XFRM_SA_DIFF(ALG_CRYPT,(strcmp(a->crypt->alg_name, b->crypt->alg_name) ||
-	                              (a->crypt->alg_key_len != b->crypt->alg_key_len) ||
-	                              memcmp(a->crypt->alg_key, b->crypt->alg_key,
-	                              ((a->crypt->alg_key_len + 7)/8))));
-	diff |= XFRM_SA_DIFF(ALG_COMP,(strcmp(a->comp->alg_name, b->comp->alg_name) ||
-	                              (a->comp->alg_key_len != b->comp->alg_key_len) ||
-	                              memcmp(a->comp->alg_key, b->comp->alg_key,
-	                              ((a->comp->alg_key_len + 7)/8))));
-	diff |= XFRM_SA_DIFF(ENCAP,((a->encap->encap_type != b->encap->encap_type) ||
-	                            (a->encap->encap_sport != b->encap->encap_sport) ||
-	                            (a->encap->encap_dport != b->encap->encap_dport) ||
-	                            nl_addr_cmp(a->encap->encap_oa, b->encap->encap_oa)));
-	diff |= XFRM_SA_DIFF(TFCPAD,a->tfcpad != b->tfcpad);
-	diff |= XFRM_SA_DIFF(COADDR,nl_addr_cmp(a->coaddr, b->coaddr));
-	diff |= XFRM_SA_DIFF(MARK,(a->mark.m != b->mark.m) ||
-	                          (a->mark.v != b->mark.v));
-	diff |= XFRM_SA_DIFF(SECCTX,((a->sec_ctx->ctx_doi != b->sec_ctx->ctx_doi) ||
-	                            (a->sec_ctx->ctx_alg != b->sec_ctx->ctx_alg) ||
-	                            (a->sec_ctx->ctx_len != b->sec_ctx->ctx_len) ||
-	                            strcmp(a->sec_ctx->ctx, b->sec_ctx->ctx)));
-	diff |= XFRM_SA_DIFF(REPLAY_MAXAGE,a->replay_maxage != b->replay_maxage);
-	diff |= XFRM_SA_DIFF(REPLAY_MAXDIFF,a->replay_maxdiff != b->replay_maxdiff);
-	diff |= XFRM_SA_DIFF(EXPIRE,a->hard != b->hard);
+#define _DIFF(ATTR, EXPR) ATTR_DIFF(attrs, ATTR, a, b, EXPR)
+	diff |= _DIFF(XFRM_SA_ATTR_SEL, xfrmnl_sel_cmp(a->sel, b->sel));
+	diff |= _DIFF(XFRM_SA_ATTR_DADDR,
+		      nl_addr_cmp(a->id.daddr, b->id.daddr));
+	diff |= _DIFF(XFRM_SA_ATTR_SPI, a->id.spi != b->id.spi);
+	diff |= _DIFF(XFRM_SA_ATTR_PROTO, a->id.proto != b->id.proto);
+	diff |= _DIFF(XFRM_SA_ATTR_SADDR, nl_addr_cmp(a->saddr, b->saddr));
+	diff |= _DIFF(XFRM_SA_ATTR_LTIME_CFG,
+		      xfrmnl_ltime_cfg_cmp(a->lft, b->lft));
+	diff |= _DIFF(XFRM_SA_ATTR_REQID, a->reqid != b->reqid);
+	diff |= _DIFF(XFRM_SA_ATTR_FAMILY, a->family != b->family);
+	diff |= _DIFF(XFRM_SA_ATTR_MODE, a->mode != b->mode);
+	diff |= _DIFF(XFRM_SA_ATTR_REPLAY_WIN,
+		      a->replay_window != b->replay_window);
+	diff |= _DIFF(XFRM_SA_ATTR_FLAGS, a->flags != b->flags);
+	diff |= _DIFF(XFRM_SA_ATTR_ALG_AEAD,
+		      (strcmp(a->aead->alg_name, b->aead->alg_name) ||
+		       (a->aead->alg_key_len != b->aead->alg_key_len) ||
+		       (a->aead->alg_icv_len != b->aead->alg_icv_len) ||
+		       memcmp(a->aead->alg_key, b->aead->alg_key,
+			      ((a->aead->alg_key_len + 7) / 8))));
+	diff |= _DIFF(XFRM_SA_ATTR_ALG_AUTH,
+		      (strcmp(a->auth->alg_name, b->auth->alg_name) ||
+		       (a->auth->alg_key_len != b->auth->alg_key_len) ||
+		       (a->auth->alg_trunc_len != b->auth->alg_trunc_len) ||
+		       memcmp(a->auth->alg_key, b->auth->alg_key,
+			      ((a->auth->alg_key_len + 7) / 8))));
+	diff |= _DIFF(XFRM_SA_ATTR_ALG_CRYPT,
+		      (strcmp(a->crypt->alg_name, b->crypt->alg_name) ||
+		       (a->crypt->alg_key_len != b->crypt->alg_key_len) ||
+		       memcmp(a->crypt->alg_key, b->crypt->alg_key,
+			      ((a->crypt->alg_key_len + 7) / 8))));
+	diff |= _DIFF(XFRM_SA_ATTR_ALG_COMP,
+		      (strcmp(a->comp->alg_name, b->comp->alg_name) ||
+		       (a->comp->alg_key_len != b->comp->alg_key_len) ||
+		       memcmp(a->comp->alg_key, b->comp->alg_key,
+			      ((a->comp->alg_key_len + 7) / 8))));
+	diff |= _DIFF(XFRM_SA_ATTR_ENCAP,
+		      ((a->encap->encap_type != b->encap->encap_type) ||
+		       (a->encap->encap_sport != b->encap->encap_sport) ||
+		       (a->encap->encap_dport != b->encap->encap_dport) ||
+		       nl_addr_cmp(a->encap->encap_oa, b->encap->encap_oa)));
+	diff |= _DIFF(XFRM_SA_ATTR_TFCPAD, a->tfcpad != b->tfcpad);
+	diff |= _DIFF(XFRM_SA_ATTR_COADDR, nl_addr_cmp(a->coaddr, b->coaddr));
+	diff |= _DIFF(XFRM_SA_ATTR_MARK,
+		      (a->mark.m != b->mark.m) || (a->mark.v != b->mark.v));
+	diff |= _DIFF(XFRM_SA_ATTR_IF_ID, a->if_id != b->if_id);
+	diff |= _DIFF(XFRM_SA_ATTR_SECCTX,
+		      ((a->sec_ctx->ctx_doi != b->sec_ctx->ctx_doi) ||
+		       (a->sec_ctx->ctx_alg != b->sec_ctx->ctx_alg) ||
+		       (a->sec_ctx->ctx_len != b->sec_ctx->ctx_len) ||
+		       strcmp(a->sec_ctx->ctx, b->sec_ctx->ctx)));
+	diff |= _DIFF(XFRM_SA_ATTR_REPLAY_MAXAGE,
+		      a->replay_maxage != b->replay_maxage);
+	diff |= _DIFF(XFRM_SA_ATTR_REPLAY_MAXDIFF,
+		      a->replay_maxdiff != b->replay_maxdiff);
+	diff |= _DIFF(XFRM_SA_ATTR_EXPIRE, a->hard != b->hard);
 
 	/* Compare replay states */
 	found = AVAILABLE_MISMATCH (a, b, XFRM_SA_ATTR_REPLAY_STATE);
@@ -296,7 +404,7 @@ static uint64_t xfrm_sa_compare(struct nl_object *_a, struct nl_object *_b,
 			}
 		}
 	}
-#undef XFRM_SA_DIFF
+#undef _DIFF
 
 	return diff;
 }
@@ -333,6 +441,8 @@ static const struct trans_tbl sa_attrs[] = {
 	__ADD(XFRM_SA_ATTR_REPLAY_MAXDIFF, replay_maxdiff),
 	__ADD(XFRM_SA_ATTR_REPLAY_STATE, replay_state),
 	__ADD(XFRM_SA_ATTR_EXPIRE, expire),
+	__ADD(XFRM_SA_ATTR_OFFLOAD_DEV, user_offload),
+	__ADD(XFRM_SA_ATTR_IF_ID, if_id),
 };
 
 static char* xfrm_sa_attrs2str(int attrs, char *buf, size_t len)
@@ -398,6 +508,7 @@ static void xfrm_sa_dump_line(struct nl_object *a, struct nl_dump_params *p)
 	char                flags[128], mode[128];
 	time_t              add_time, use_time;
 	struct tm           *add_time_tm, *use_time_tm;
+	struct tm           tm_buf;
 
 	nl_dump_line(p, "src %s dst %s family: %s\n", nl_addr2str(sa->saddr, src, sizeof(src)),
 	             nl_addr2str(sa->id.daddr, dst, sizeof(dst)),
@@ -430,18 +541,27 @@ static void xfrm_sa_dump_line(struct nl_object *a, struct nl_dump_params *p)
 		sprintf (mode, "INF");
 	else
 		sprintf (mode, "%" PRIu64, sa->lft->hard_packet_limit);
-	nl_dump_line(p, "\t\thard limit: %s (bytes), %s (packets)\n", flags, mode);
-	nl_dump_line(p, "\t\tsoft add_time: %llu (seconds), soft use_time: %llu (seconds) \n",
-	             sa->lft->soft_add_expires_seconds, sa->lft->soft_use_expires_seconds);
-	nl_dump_line(p, "\t\thard add_time: %llu (seconds), hard use_time: %llu (seconds) \n",
-	             sa->lft->hard_add_expires_seconds, sa->lft->hard_use_expires_seconds);
+	nl_dump_line(p, "\t\thard limit: %s (bytes), %s (packets)\n", flags,
+		     mode);
+	nl_dump_line(
+		p,
+		"\t\tsoft add_time: %llu (seconds), soft use_time: %llu (seconds) \n",
+		(long long unsigned)sa->lft->soft_add_expires_seconds,
+		(long long unsigned)sa->lft->soft_use_expires_seconds);
+	nl_dump_line(
+		p,
+		"\t\thard add_time: %llu (seconds), hard use_time: %llu (seconds) \n",
+		(long long unsigned)sa->lft->hard_add_expires_seconds,
+		(long long unsigned)sa->lft->hard_use_expires_seconds);
 
 	nl_dump_line(p, "\tlifetime current: \n");
-	nl_dump_line(p, "\t\t%llu bytes, %llu packets\n", sa->curlft.bytes, sa->curlft.packets);
+	nl_dump_line(p, "\t\t%llu bytes, %llu packets\n",
+		     (long long unsigned)sa->curlft.bytes,
+		     (long long unsigned)sa->curlft.packets);
 	if (sa->curlft.add_time != 0)
 	{
 		add_time = sa->curlft.add_time;
-		add_time_tm = gmtime (&add_time);
+		add_time_tm = gmtime_r (&add_time, &tm_buf);
 		strftime (flags, 128, "%Y-%m-%d %H-%M-%S", add_time_tm);
 	}
 	else
@@ -452,7 +572,7 @@ static void xfrm_sa_dump_line(struct nl_object *a, struct nl_dump_params *p)
 	if (sa->curlft.use_time != 0)
 	{
 		use_time = sa->curlft.use_time;
-		use_time_tm = gmtime (&use_time);
+		use_time_tm = gmtime_r (&use_time, &tm_buf);
 		strftime (mode, 128, "%Y-%m-%d %H-%M-%S", use_time_tm);
 	}
 	else
@@ -505,6 +625,9 @@ static void xfrm_sa_dump_line(struct nl_object *a, struct nl_dump_params *p)
 
 	if (sa->ce_mask & XFRM_SA_ATTR_MARK)
 		nl_dump_line(p, "\tMark mask: 0x%x Mark value: 0x%x\n", sa->mark.m, sa->mark.v);
+
+	if (sa->ce_mask & XFRM_SA_ATTR_IF_ID)
+		nl_dump_line(p, "\tXFRM interface ID: 0x%x\n", sa->if_id);
 
 	if (sa->ce_mask & XFRM_SA_ATTR_SECCTX)
 		nl_dump_line(p, "\tDOI: %d Algo: %d Len: %u ctx: %s\n", sa->sec_ctx->ctx_doi,
@@ -639,6 +762,7 @@ static struct nla_policy xfrm_sa_policy[XFRMA_MAX+1] = {
 	[XFRMA_SEC_CTX]         = { .minlen = sizeof(struct xfrm_sec_ctx) },
 	[XFRMA_LTIME_VAL]       = { .minlen = sizeof(struct xfrm_lifetime_cur) },
 	[XFRMA_REPLAY_VAL]      = { .minlen = sizeof(struct xfrm_replay_state) },
+	[XFRMA_OFFLOAD_DEV]     = { .minlen = sizeof(struct xfrm_user_offload) },
 	[XFRMA_REPLAY_THRESH]   = { .type = NLA_U32 },
 	[XFRMA_ETIMER_THRESH]   = { .type = NLA_U32 },
 	[XFRMA_SRCADDR]         = { .minlen = sizeof(xfrm_address_t) },
@@ -646,6 +770,7 @@ static struct nla_policy xfrm_sa_policy[XFRMA_MAX+1] = {
 	[XFRMA_MARK]            = { .minlen = sizeof(struct xfrm_mark) },
 	[XFRMA_TFCPAD]          = { .type = NLA_U32 },
 	[XFRMA_REPLAY_ESN_VAL]  = { .minlen = sizeof(struct xfrm_replay_state_esn) },
+	[XFRMA_IF_ID]           = { .type = NLA_U32 },
 };
 
 static int xfrm_sa_request_update(struct nl_cache *c, struct nl_sock *h)
@@ -655,18 +780,17 @@ static int xfrm_sa_request_update(struct nl_cache *c, struct nl_sock *h)
 
 int xfrmnl_sa_parse(struct nlmsghdr *n, struct xfrmnl_sa **result)
 {
-	struct xfrmnl_sa*           sa;
+	_nl_auto_nl_addr struct nl_addr *addr1 = NULL;
+	_nl_auto_nl_addr struct nl_addr *addr2 = NULL;
+	_nl_auto_xfrmnl_sa struct xfrmnl_sa *sa = NULL;
 	struct nlattr               *tb[XFRMA_MAX + 1];
 	struct xfrm_usersa_info*    sa_info;
 	struct xfrm_user_expire*    ue;
 	int                         len, err;
-	struct nl_addr*             addr;
 
 	sa = xfrmnl_sa_alloc();
-	if (!sa) {
-		err = -NLE_NOMEM;
-		goto errout;
-	}
+	if (!sa)
+		return -NLE_NOMEM;
 
 	sa->ce_msgtype = n->nlmsg_type;
 	if (n->nlmsg_type == XFRM_MSG_EXPIRE)
@@ -687,22 +811,18 @@ int xfrmnl_sa_parse(struct nlmsghdr *n, struct xfrmnl_sa **result)
 
 	err = nlmsg_parse(n, sizeof(struct xfrm_usersa_info), tb, XFRMA_MAX, xfrm_sa_policy);
 	if (err < 0)
-		goto errout;
+		return err;
 
-	if (sa_info->sel.family == AF_INET)
-		addr    = nl_addr_build (sa_info->sel.family, &sa_info->sel.daddr.a4, sizeof (sa_info->sel.daddr.a4));
-	else
-		addr    = nl_addr_build (sa_info->sel.family, &sa_info->sel.daddr.a6, sizeof (sa_info->sel.daddr.a6));
-	nl_addr_set_prefixlen (addr, sa_info->sel.prefixlen_d);
-	xfrmnl_sel_set_daddr (sa->sel, addr);
+	if (!(addr1 = _nl_addr_build(sa_info->sel.family, &sa_info->sel.daddr)))
+		return -NLE_NOMEM;
+	nl_addr_set_prefixlen (addr1, sa_info->sel.prefixlen_d);
+	xfrmnl_sel_set_daddr (sa->sel, addr1);
 	xfrmnl_sel_set_prefixlen_d (sa->sel, sa_info->sel.prefixlen_d);
 
-	if (sa_info->sel.family == AF_INET)
-		addr    = nl_addr_build (sa_info->sel.family, &sa_info->sel.saddr.a4, sizeof (sa_info->sel.saddr.a4));
-	else
-		addr    = nl_addr_build (sa_info->sel.family, &sa_info->sel.saddr.a6, sizeof (sa_info->sel.saddr.a6));
-	nl_addr_set_prefixlen (addr, sa_info->sel.prefixlen_s);
-	xfrmnl_sel_set_saddr (sa->sel, addr);
+	if (!(addr2 = _nl_addr_build(sa_info->sel.family, &sa_info->sel.saddr)))
+		return -NLE_NOMEM;
+	nl_addr_set_prefixlen (addr2, sa_info->sel.prefixlen_s);
+	xfrmnl_sel_set_saddr (sa->sel, addr2);
 	xfrmnl_sel_set_prefixlen_s (sa->sel, sa_info->sel.prefixlen_s);
 
 	xfrmnl_sel_set_dport (sa->sel, ntohs(sa_info->sel.dport));
@@ -715,18 +835,14 @@ int xfrmnl_sa_parse(struct nlmsghdr *n, struct xfrmnl_sa **result)
 	xfrmnl_sel_set_userid (sa->sel, sa_info->sel.user);
 	sa->ce_mask             |= XFRM_SA_ATTR_SEL;
 
-	if (sa_info->family == AF_INET)
-		sa->id.daddr        = nl_addr_build (sa_info->family, &sa_info->id.daddr.a4, sizeof (sa_info->id.daddr.a4));
-	else
-		sa->id.daddr        = nl_addr_build (sa_info->family, &sa_info->id.daddr.a6, sizeof (sa_info->id.daddr.a6));
+	if (!(sa->id.daddr = _nl_addr_build(sa_info->family, &sa_info->id.daddr)))
+		return -NLE_NOMEM;
 	sa->id.spi              = ntohl(sa_info->id.spi);
 	sa->id.proto            = sa_info->id.proto;
 	sa->ce_mask             |= (XFRM_SA_ATTR_DADDR | XFRM_SA_ATTR_SPI | XFRM_SA_ATTR_PROTO);
 
-	if (sa_info->family == AF_INET)
-		sa->saddr           = nl_addr_build (sa_info->family, &sa_info->saddr.a4, sizeof (sa_info->saddr.a4));
-	else
-		sa->saddr           = nl_addr_build (sa_info->family, &sa_info->saddr.a6, sizeof (sa_info->saddr.a6));
+	if (!(sa->saddr = _nl_addr_build(sa_info->family, &sa_info->saddr)))
+		return -NLE_NOMEM;
 	sa->ce_mask             |= XFRM_SA_ATTR_SADDR;
 
 	sa->lft->soft_byte_limit    =   sa_info->lft.soft_byte_limit;
@@ -762,36 +878,30 @@ int xfrmnl_sa_parse(struct nlmsghdr *n, struct xfrmnl_sa **result)
 
 	if (tb[XFRMA_ALG_AEAD]) {
 		struct xfrm_algo_aead* aead = nla_data(tb[XFRMA_ALG_AEAD]);
+
 		len = sizeof (struct xfrmnl_algo_aead) + ((aead->alg_key_len + 7) / 8);
 		if ((sa->aead = calloc (1, len)) == NULL)
-		{
-			err = -NLE_NOMEM;
-			goto errout;
-		}
+			return -NLE_NOMEM;
 		memcpy ((void *)sa->aead, (void *)aead, len);
 		sa->ce_mask     |= XFRM_SA_ATTR_ALG_AEAD;
 	}
 
 	if (tb[XFRMA_ALG_AUTH_TRUNC]) {
 		struct xfrm_algo_auth* auth = nla_data(tb[XFRMA_ALG_AUTH_TRUNC]);
+
 		len = sizeof (struct xfrmnl_algo_auth) + ((auth->alg_key_len + 7) / 8);
 		if ((sa->auth = calloc (1, len)) == NULL)
-		{
-			err = -NLE_NOMEM;
-			goto errout;
-		}
+			return -NLE_NOMEM;
 		memcpy ((void *)sa->auth, (void *)auth, len);
 		sa->ce_mask     |= XFRM_SA_ATTR_ALG_AUTH;
 	}
 
 	if (tb[XFRMA_ALG_AUTH] && !sa->auth) {
 		struct xfrm_algo* auth = nla_data(tb[XFRMA_ALG_AUTH]);
+
 		len = sizeof (struct xfrmnl_algo_auth) + ((auth->alg_key_len + 7) / 8);
 		if ((sa->auth = calloc (1, len)) == NULL)
-		{
-			err = -NLE_NOMEM;
-			goto errout;
-		}
+			return -NLE_NOMEM;
 		strcpy(sa->auth->alg_name, auth->alg_name);
 		memcpy(sa->auth->alg_key, auth->alg_key, (auth->alg_key_len + 7) / 8);
 		sa->auth->alg_key_len = auth->alg_key_len;
@@ -800,43 +910,36 @@ int xfrmnl_sa_parse(struct nlmsghdr *n, struct xfrmnl_sa **result)
 
 	if (tb[XFRMA_ALG_CRYPT]) {
 		struct xfrm_algo* crypt = nla_data(tb[XFRMA_ALG_CRYPT]);
+
 		len = sizeof (struct xfrmnl_algo) + ((crypt->alg_key_len + 7) / 8);
 		if ((sa->crypt = calloc (1, len)) == NULL)
-		{
-			err = -NLE_NOMEM;
-			goto errout;
-		}
+			return -NLE_NOMEM;
 		memcpy ((void *)sa->crypt, (void *)crypt, len);
 		sa->ce_mask     |= XFRM_SA_ATTR_ALG_CRYPT;
 	}
 
 	if (tb[XFRMA_ALG_COMP]) {
 		struct xfrm_algo* comp = nla_data(tb[XFRMA_ALG_COMP]);
+
 		len = sizeof (struct xfrmnl_algo) + ((comp->alg_key_len + 7) / 8);
 		if ((sa->comp = calloc (1, len)) == NULL)
-		{
-			err = -NLE_NOMEM;
-			goto errout;
-		}
+			return -NLE_NOMEM;
 		memcpy ((void *)sa->comp, (void *)comp, len);
 		sa->ce_mask     |= XFRM_SA_ATTR_ALG_COMP;
 	}
 
 	if (tb[XFRMA_ENCAP]) {
 		struct xfrm_encap_tmpl* encap = nla_data(tb[XFRMA_ENCAP]);
+
 		len = sizeof (struct xfrmnl_encap_tmpl);
 		if ((sa->encap = calloc (1, len)) == NULL)
-		{
-			err = -NLE_NOMEM;
-			goto errout;
-		}
+			return -NLE_NOMEM;
 		sa->encap->encap_type   =   encap->encap_type;
 		sa->encap->encap_sport  =   ntohs(encap->encap_sport);
 		sa->encap->encap_dport  =   ntohs(encap->encap_dport);
-		if (sa_info->family == AF_INET)
-			sa->encap->encap_oa =   nl_addr_build (sa_info->family, &encap->encap_oa.a4, sizeof (encap->encap_oa.a4));
-		else
-			sa->encap->encap_oa =   nl_addr_build (sa_info->family, &encap->encap_oa.a6, sizeof (encap->encap_oa.a6));
+		if (!(sa->encap->encap_oa = _nl_addr_build(sa_info->family,
+							   &encap->encap_oa)))
+			return -NLE_NOMEM;
 		sa->ce_mask     |= XFRM_SA_ATTR_ENCAP;
 	}
 
@@ -846,21 +949,15 @@ int xfrmnl_sa_parse(struct nlmsghdr *n, struct xfrmnl_sa **result)
 	}
 
 	if (tb[XFRMA_COADDR]) {
-		if (sa_info->family == AF_INET)
-		{
-			sa->coaddr  = nl_addr_build(sa_info->family, nla_data(tb[XFRMA_COADDR]),
-			                            sizeof (uint32_t));
-		}
-		else
-		{
-			sa->coaddr  = nl_addr_build(sa_info->family, nla_data(tb[XFRMA_COADDR]),
-			                            sizeof (uint32_t) * 4);
-		}
+		if (!(sa->coaddr = _nl_addr_build(
+			      sa_info->family, nla_data(tb[XFRMA_COADDR]))))
+			return -NLE_NOMEM;
 		sa->ce_mask         |= XFRM_SA_ATTR_COADDR;
 	}
 
 	if (tb[XFRMA_MARK]) {
 		struct xfrm_mark* m =   nla_data(tb[XFRMA_MARK]);
+
 		sa->mark.m  =   m->m;
 		sa->mark.v  =   m->v;
 		sa->ce_mask |= XFRM_SA_ATTR_MARK;
@@ -868,12 +965,10 @@ int xfrmnl_sa_parse(struct nlmsghdr *n, struct xfrmnl_sa **result)
 
 	if (tb[XFRMA_SEC_CTX]) {
 		struct xfrm_user_sec_ctx* sec_ctx = nla_data(tb[XFRMA_SEC_CTX]);
+
 		len = sizeof (struct xfrmnl_user_sec_ctx) + sec_ctx->ctx_len;
 		if ((sa->sec_ctx = calloc (1, len)) == NULL)
-		{
-			err = -NLE_NOMEM;
-			goto errout;
-		}
+			return -NLE_NOMEM;
 		memcpy (sa->sec_ctx, sec_ctx, len);
 		sa->ce_mask     |= XFRM_SA_ATTR_SECCTX;
 	}
@@ -890,12 +985,10 @@ int xfrmnl_sa_parse(struct nlmsghdr *n, struct xfrmnl_sa **result)
 
 	if (tb[XFRMA_REPLAY_ESN_VAL]) {
 		struct xfrm_replay_state_esn* esn = nla_data (tb[XFRMA_REPLAY_ESN_VAL]);
+
 		len =   sizeof (struct xfrmnl_replay_state_esn) + (sizeof (uint32_t) * esn->bmp_len);
 		if ((sa->replay_state_esn = calloc (1, len)) == NULL)
-		{
-			err = -NLE_NOMEM;
-			goto errout;
-		}
+			return -NLE_NOMEM;
 		memcpy ((void *)sa->replay_state_esn, (void *)esn, len);
 		sa->ce_mask |= XFRM_SA_ATTR_REPLAY_STATE;
 	}
@@ -909,19 +1002,32 @@ int xfrmnl_sa_parse(struct nlmsghdr *n, struct xfrmnl_sa **result)
 		sa->replay_state_esn = NULL;
 	}
 
-	*result = sa;
-	return 0;
+	if (tb[XFRMA_OFFLOAD_DEV]) {
+		struct xfrm_user_offload *offload;
 
-errout:
-	xfrmnl_sa_put(sa);
-	return err;
+		len = sizeof(struct xfrmnl_user_offload);
+		if ((sa->user_offload = calloc(1, len)) == NULL)
+			return -NLE_NOMEM;
+		offload = nla_data(tb[XFRMA_OFFLOAD_DEV]);
+		sa->user_offload->ifindex = offload->ifindex;
+		sa->user_offload->flags = offload->flags;
+		sa->ce_mask |= XFRM_SA_ATTR_OFFLOAD_DEV;
+	}
+
+	if (tb[XFRMA_IF_ID]) {
+		sa->if_id = nla_get_u32(tb[XFRMA_IF_ID]);
+		sa->ce_mask |= XFRM_SA_ATTR_IF_ID;
+	}
+
+	*result = _nl_steal_pointer(&sa);
+	return 0;
 }
 
 static int xfrm_sa_update_cache (struct nl_cache *cache, struct nl_object *obj,
                                  change_func_t change_cb, change_func_v2_t change_cb_v2,
 				 void *data)
 {
-	struct nl_object*       old_sa;
+	_nl_auto_nl_object struct nl_object* old_sa = NULL;
 	struct xfrmnl_sa*       sa = (struct xfrmnl_sa*)obj;
 
 	if (nl_object_get_msgtype (obj) == XFRM_MSG_EXPIRE)
@@ -957,7 +1063,7 @@ static int xfrm_sa_update_cache (struct nl_cache *cache, struct nl_object *obj,
 				else if (change_cb)
 					change_cb(cache, obj, NL_ACT_NEW, data);
 			}
-			else if (old_sa)
+			else
 			{
 				uint64_t diff = 0;
 				if (change_cb || change_cb_v2)
@@ -971,7 +1077,6 @@ static int xfrm_sa_update_cache (struct nl_cache *cache, struct nl_object *obj,
 					} else if (change_cb)
 						change_cb(cache, obj, NL_ACT_CHANGE, data);
 				}
-				nl_object_put (old_sa);
 			}
 		}
 		else
@@ -982,7 +1087,6 @@ static int xfrm_sa_update_cache (struct nl_cache *cache, struct nl_object *obj,
 				change_cb_v2(cache, obj, NULL, 0, NL_ACT_DEL, data);
 			else if (change_cb)
 				change_cb (cache, obj, NL_ACT_DEL, data);
-			nl_object_put (old_sa);
 		}
 
 		/* Done handling expire message */
@@ -1259,6 +1363,25 @@ static int build_xfrm_sa_message(struct xfrmnl_sa *tmpl, int cmd, int flags, str
 		}
 	}
 
+	if (tmpl->ce_mask & XFRM_SA_ATTR_OFFLOAD_DEV) {
+		struct xfrm_user_offload *offload;
+		struct nlattr *attr;
+
+		len = sizeof(struct xfrm_user_offload);
+		attr = nla_reserve(msg, XFRMA_OFFLOAD_DEV, len);
+
+		if (!attr)
+			goto nla_put_failure;
+
+		offload = nla_data(attr);
+		offload->ifindex = tmpl->user_offload->ifindex;
+		offload->flags = tmpl->user_offload->flags;
+	}
+
+	if (tmpl->ce_mask & XFRM_SA_ATTR_IF_ID) {
+		NLA_PUT_U32 (msg, XFRMA_IF_ID, tmpl->if_id);
+	}
+
 	*result = msg;
 	return 0;
 
@@ -1331,6 +1454,7 @@ static int build_xfrm_sa_delete_message(struct xfrmnl_sa *tmpl, int cmd, int fla
 		!(tmpl->ce_mask & XFRM_SA_ATTR_PROTO))
 		return -NLE_MISSING_ATTR;
 
+	memset(&sa_id, 0, sizeof(struct xfrm_usersa_id));
 	memcpy (&sa_id.daddr, nl_addr_get_binary_addr (tmpl->id.daddr),
 	        sizeof (uint8_t) * nl_addr_get_len (tmpl->id.daddr));
 	sa_id.family = nl_addr_get_family (tmpl->id.daddr);
@@ -1593,6 +1717,27 @@ int xfrmnl_sa_set_family (struct xfrmnl_sa* sa, unsigned int family)
 	return 0;
 }
 
+int xfrmnl_sa_get_if_id (struct xfrmnl_sa* sa, uint32_t* if_id)
+{
+	if (if_id == NULL)
+		return -NLE_INVAL;
+
+	if (!(sa->ce_mask & XFRM_SA_ATTR_IF_ID))
+		return -NLE_NOATTR;
+
+	*if_id = sa->if_id;
+
+	return 0;
+}
+
+int xfrmnl_sa_set_if_id (struct xfrmnl_sa* sa, uint32_t if_id)
+{
+	sa->if_id = if_id;
+	sa->ce_mask |= XFRM_SA_ATTR_IF_ID;
+
+	return 0;
+}
+
 int xfrmnl_sa_get_mode (struct xfrmnl_sa* sa)
 {
 	if (sa->ce_mask & XFRM_SA_ATTR_MODE)
@@ -1717,20 +1862,17 @@ int xfrmnl_sa_set_aead_params (struct xfrmnl_sa* sa, const char* alg_name, unsig
  */
 int xfrmnl_sa_get_auth_params (struct xfrmnl_sa* sa, char* alg_name, unsigned int* key_len, unsigned int* trunc_len, char* key)
 {
-	if (sa->ce_mask & XFRM_SA_ATTR_ALG_AUTH)
-	{
-		if (alg_name)
-			strcpy (alg_name, sa->auth->alg_name);
-		if (key_len)
-			*key_len = sa->auth->alg_key_len;
-		if (trunc_len)
-			*trunc_len = sa->auth->alg_trunc_len;
-		if (key)
-			memcpy (key, sa->auth->alg_key, (sa->auth->alg_key_len + 7)/8);
-	}
-	else
-		return -1;
+	if (!(sa->ce_mask & XFRM_SA_ATTR_ALG_AUTH))
+		return -NLE_MISSING_ATTR;
 
+	if (alg_name)
+		strcpy(alg_name, sa->auth->alg_name);
+	if (key_len)
+		*key_len = sa->auth->alg_key_len;
+	if (trunc_len)
+		*trunc_len = sa->auth->alg_trunc_len;
+	if (key)
+		memcpy(key, sa->auth->alg_key, (sa->auth->alg_key_len + 7) / 8);
 	return 0;
 }
 
@@ -2151,6 +2293,57 @@ int xfrmnl_sa_set_replay_state_esn (struct xfrmnl_sa* sa, unsigned int oseq, uns
 }
 
 
+/**
+ * Get interface id and flags from xfrm_user_offload.
+ *
+ * @arg sa              The xfrmnl_sa object.
+ * @arg ifindex         An optional output value for the offload interface index.
+ * @arg flags           An optional output value for the offload flags.
+ *
+ * @return 0 on success or a negative error code.
+ */
+int xfrmnl_sa_get_user_offload(struct xfrmnl_sa *sa, int *ifindex, uint8_t *flags)
+{
+	int ret = -1;
+
+	if (sa->ce_mask & XFRM_SA_ATTR_OFFLOAD_DEV && sa->user_offload) {
+		if (ifindex)
+			*ifindex = sa->user_offload->ifindex;
+		if (flags)
+			*flags = sa->user_offload->flags;
+		ret = 0;
+	}
+
+	return ret;
+}
+
+
+/**
+ * Set interface id and flags for xfrm_user_offload.
+ *
+ * @arg sa              The xfrmnl_sa object.
+ * @arg ifindex         Id of the offload interface.
+ * @arg flags           Offload flags for the state.
+ *
+ * @return 0 on success or a negative error code.
+ */
+int xfrmnl_sa_set_user_offload(struct xfrmnl_sa *sa, int ifindex, uint8_t flags)
+{
+	_nl_auto_free struct xfrmnl_user_offload *b = NULL;
+
+	if (!(b = calloc(1, sizeof(*b))))
+		return -1;
+
+	b->ifindex = ifindex;
+	b->flags = flags;
+
+	free(sa->user_offload);
+	sa->user_offload = _nl_steal_pointer(&b);
+	sa->ce_mask |= XFRM_SA_ATTR_OFFLOAD_DEV;
+
+	return 0;
+}
+
 int xfrmnl_sa_is_hardexpiry_reached (struct xfrmnl_sa* sa)
 {
 	if (sa->ce_mask & XFRM_SA_ATTR_EXPIRE)
@@ -2215,12 +2408,12 @@ static struct nl_cache_ops xfrmnl_sa_ops = {
  * @{
  */
 
-static void __attribute__ ((constructor)) xfrm_sa_init(void)
+static void _nl_init xfrm_sa_init(void)
 {
 	nl_cache_mngt_register(&xfrmnl_sa_ops);
 }
 
-static void __attribute__ ((destructor)) xfrm_sa_exit(void)
+static void _nl_exit xfrm_sa_exit(void)
 {
 	nl_cache_mngt_unregister(&xfrmnl_sa_ops);
 }

@@ -17,17 +17,20 @@
  * @{
  */
 
-#include <netlink-private/netlink.h>
+#include "nl-default.h"
+
+#include <linux/if_link.h>
+#include <linux/rtnetlink.h>
+
 #include <netlink/netlink.h>
 #include <netlink/attr.h>
 #include <netlink/utils.h>
 #include <netlink/object.h>
 #include <netlink/route/rtnl.h>
-#include <netlink-private/route/link/api.h>
 #include <netlink/route/link/vrf.h>
 
-#include <linux/if_link.h>
-#include <linux-private/linux/rtnetlink.h>
+#include "nl-route.h"
+#include "link-api.h"
 
 #define VRF_TABLE_ID_MAX  RT_TABLE_MAX
 
@@ -175,12 +178,11 @@ static struct rtnl_link_info_ops vrf_info_ops = {
 struct rtnl_link *rtnl_link_vrf_alloc(void)
 {
 	struct rtnl_link *link;
-	int err;
 
 	if (!(link = rtnl_link_alloc()))
 		return NULL;
 
-	if ((err = rtnl_link_set_type(link, "vrf")) < 0) {
+	if (rtnl_link_set_type(link, "vrf") < 0) {
 		rtnl_link_put(link);
 		return NULL;
 	}
@@ -234,8 +236,8 @@ int rtnl_link_vrf_set_tableid(struct rtnl_link *link, uint32_t id)
 	struct vrf_info *vi = link->l_info;
 
 	IS_VRF_LINK_ASSERT(link);
-	if(id > VRF_TABLE_ID_MAX)
-		return -NLE_INVAL;
+
+	_NL_STATIC_ASSERT(VRF_TABLE_ID_MAX == UINT32_MAX);
 
 	vi->table_id = id;
 	vi->vi_mask |= VRF_HAS_TABLE_ID;
@@ -245,12 +247,12 @@ int rtnl_link_vrf_set_tableid(struct rtnl_link *link, uint32_t id)
 
 /** @} */
 
-static void __init vrf_init(void)
+static void _nl_init vrf_init(void)
 {
 	rtnl_link_register_info(&vrf_info_ops);
 }
 
-static void __exit vrf_exit(void)
+static void _nl_exit vrf_exit(void)
 {
 	rtnl_link_unregister_info(&vrf_info_ops);
 }

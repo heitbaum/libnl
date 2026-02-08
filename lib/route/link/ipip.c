@@ -16,15 +16,20 @@
  * @{
  */
 
-#include <netlink-private/netlink.h>
+#include "nl-default.h"
+
+#include <linux/if_tunnel.h>
+
 #include <netlink/netlink.h>
 #include <netlink/attr.h>
 #include <netlink/utils.h>
 #include <netlink/object.h>
 #include <netlink/route/rtnl.h>
 #include <netlink/route/link/ipip.h>
-#include <netlink-private/route/link/api.h>
-#include <linux/if_tunnel.h>
+
+#include "nl-route.h"
+#include "link-api.h"
+#include "nl-aux-route/nl-route.h"
 
 #define IPIP_ATTR_LINK          (1 << 0)
 #define IPIP_ATTR_LOCAL         (1 << 1)
@@ -32,6 +37,7 @@
 #define IPIP_ATTR_TTL           (1 << 3)
 #define IPIP_ATTR_TOS           (1 << 4)
 #define IPIP_ATTR_PMTUDISC      (1 << 5)
+#define IPIP_ATTR_FWMARK        (1 << 6)
 
 struct ipip_info
 {
@@ -41,6 +47,7 @@ struct ipip_info
 	uint32_t   link;
 	uint32_t   local;
 	uint32_t   remote;
+	uint32_t   fwmark;
 	uint32_t   ipip_mask;
 };
 
@@ -51,6 +58,7 @@ static struct nla_policy ipip_policy[IFLA_IPTUN_MAX + 1] = {
 	[IFLA_IPTUN_TTL]        = { .type = NLA_U8 },
 	[IFLA_IPTUN_TOS]        = { .type = NLA_U8 },
 	[IFLA_IPTUN_PMTUDISC]   = { .type = NLA_U8 },
+	[IFLA_IPTUN_FWMARK]     = { .type = NLA_U32 },
 };
 
 static int ipip_alloc(struct rtnl_link *link)
@@ -119,6 +127,11 @@ static int ipip_parse(struct rtnl_link *link, struct nlattr *data,
 		ipip->ipip_mask |= IPIP_ATTR_PMTUDISC;
 	}
 
+	if (tb[IFLA_IPTUN_FWMARK]) {
+		ipip->fwmark = nla_get_u32(tb[IFLA_IPTUN_FWMARK]);
+		ipip->ipip_mask |= IPIP_ATTR_FWMARK;
+	}
+
 	err = 0;
 
 errout:
@@ -152,6 +165,9 @@ static int ipip_put_attrs(struct nl_msg *msg, struct rtnl_link *link)
 	if (ipip->ipip_mask & IPIP_ATTR_PMTUDISC)
 		NLA_PUT_U8(msg, IFLA_IPTUN_PMTUDISC, ipip->pmtudisc);
 
+	if (ipip->ipip_mask & IPIP_ATTR_FWMARK)
+		NLA_PUT_U32(msg, IFLA_IPTUN_FWMARK, ipip->fwmark);
+
 	nla_nest_end(msg, data);
 
 nla_put_failure:
@@ -174,10 +190,12 @@ static void ipip_dump_line(struct rtnl_link *link, struct nl_dump_params *p)
 static void ipip_dump_details(struct rtnl_link *link, struct nl_dump_params *p)
 {
 	struct ipip_info *ipip = link->l_info;
-	char *name, addr[INET_ADDRSTRLEN];
-	struct rtnl_link *parent;
+	char addr[INET_ADDRSTRLEN];
 
 	if (ipip->ipip_mask & IPIP_ATTR_LINK) {
+		_nl_auto_rtnl_link struct rtnl_link *parent = NULL;
+		char *name;
+
 		nl_dump(p, "      link ");
 
 		name = NULL;
@@ -193,18 +211,14 @@ static void ipip_dump_details(struct rtnl_link *link, struct nl_dump_params *p)
 
 	if (ipip->ipip_mask & IPIP_ATTR_LOCAL) {
 		nl_dump(p, "      local ");
-		if(inet_ntop(AF_INET, &ipip->local, addr, sizeof(addr)))
-			nl_dump_line(p, "%s\n", addr);
-		else
-			nl_dump_line(p, "%#x\n", ntohs(ipip->local));
+		_nl_inet_ntop4(ipip->local, addr);
+		nl_dump_line(p, "%s\n", addr);
 	}
 
 	if (ipip->ipip_mask & IPIP_ATTR_REMOTE) {
 		nl_dump(p, "      remote ");
-		if(inet_ntop(AF_INET, &ipip->remote, addr, sizeof(addr)))
-			nl_dump_line(p, "%s\n", addr);
-		else
-			nl_dump_line(p, "%#x\n", ntohs(ipip->remote));
+		_nl_inet_ntop4(ipip->remote, addr);
+		nl_dump_line(p, "%s\n", addr);
 	}
 
 	if (ipip->ipip_mask & IPIP_ATTR_TTL) {
@@ -220,6 +234,11 @@ static void ipip_dump_details(struct rtnl_link *link, struct nl_dump_params *p)
 	if (ipip->ipip_mask & IPIP_ATTR_PMTUDISC) {
 		nl_dump(p, "      pmtudisc ");
 		nl_dump_line(p, "enabled (%#x)\n", ipip->pmtudisc);
+	}
+
+	if (ipip->ipip_mask & IPIP_ATTR_FWMARK) {
+		nl_dump(p, "      fwmark ");
+		nl_dump_line(p, "%x\n", ipip->fwmark);
 	}
 }
 
@@ -522,12 +541,52 @@ uint8_t rtnl_link_ipip_get_pmtudisc(struct rtnl_link *link)
 	return ipip->pmtudisc;
 }
 
-static void __init ipip_init(void)
+/**
+ * Set IPIP tunnel fwmark
+ * @arg link            Link object
+ * @arg fwmark          fwmark
+ *
+ * @return 0 on success or a negative error code
+ */
+int rtnl_link_ipip_set_fwmark(struct rtnl_link *link, uint32_t fwmark)
+{
+	struct ipip_info *ipip = link->l_info;
+
+	IS_IPIP_LINK_ASSERT(link);
+
+	ipip->fwmark = fwmark;
+	ipip->ipip_mask |= IPIP_ATTR_FWMARK;
+
+	return 0;
+}
+
+/**
+ * Get IPIP tunnel fwmark
+ * @arg link            Link object
+ * @arg fwmark          addr to fill in with the fwmark
+ *
+ * @return 0 on success or a negative error code
+ */
+int rtnl_link_ipip_get_fwmark(struct rtnl_link *link, uint32_t *fwmark)
+{
+	struct ipip_info *ipip = link->l_info;
+
+	IS_IPIP_LINK_ASSERT(link);
+
+	if (!(ipip->ipip_mask & IPIP_ATTR_FWMARK))
+		return -NLE_NOATTR;
+
+	*fwmark = ipip->fwmark;
+
+	return 0;
+}
+
+static void _nl_init ipip_init(void)
 {
 	rtnl_link_register_info(&ipip_info_ops);
 }
 
-static void __exit ipip_exit(void)
+static void _nl_exit ipip_exit(void)
 {
 	rtnl_link_unregister_info(&ipip_info_ops);
 }

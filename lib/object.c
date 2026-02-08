@@ -21,11 +21,18 @@
  * ~~~~
  */
 
-#include <netlink-private/netlink.h>
+#include "nl-default.h"
+
 #include <netlink/netlink.h>
 #include <netlink/cache.h>
 #include <netlink/object.h>
 #include <netlink/utils.h>
+
+#include "nl-core.h"
+#include "nl-priv-dynamic-core/nl-core.h"
+#include "nl-priv-dynamic-core/object-api.h"
+#include "nl-priv-dynamic-core/cache-api.h"
+#include "nl-aux-core/nl-core.h"
 
 static inline struct nl_object_ops *obj_ops(struct nl_object *obj)
 {
@@ -126,6 +133,11 @@ struct nl_object *nl_object_clone(struct nl_object *obj)
 
 	if (size)
 		memcpy((char *)new + doff, (char *)obj + doff, size);
+
+	/* Note that the base implementation already initializes @new via memcpy().
+	 * That means, simple fields don't need to be handled via oo_clone().
+	 * However, this is only a shallow-copy, so oo_clone() MUST fix all
+	 * pointer values accordingly. */
 
 	if (ops->oo_clone) {
 		if (ops->oo_clone(new, obj) < 0) {
@@ -387,7 +399,7 @@ uint32_t nl_object_diff(struct nl_object *a, struct nl_object *b)
 	diff = nl_object_diff64(a, b);
 
 	return (diff & ~((uint64_t) 0xFFFFFFFF))
-		? (uint32_t) diff | (1 << 31)
+		? (uint32_t) diff | (((uint32_t ) 1u) << 31)
 		: (uint32_t) diff;
 }
 

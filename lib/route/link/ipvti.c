@@ -16,21 +16,27 @@
  * @{
  */
 
-#include <netlink-private/netlink.h>
+#include "nl-default.h"
+
+#include <linux/if_tunnel.h>
+
 #include <netlink/netlink.h>
 #include <netlink/attr.h>
 #include <netlink/utils.h>
 #include <netlink/object.h>
 #include <netlink/route/rtnl.h>
 #include <netlink/route/link/ipvti.h>
-#include <netlink-private/route/link/api.h>
-#include <linux/if_tunnel.h>
+
+#include "nl-route.h"
+#include "link-api.h"
+#include "nl-aux-route/nl-route.h"
 
 #define IPVTI_ATTR_LINK		 (1 << 0)
 #define IPVTI_ATTR_IKEY		 (1 << 1)
 #define IPVTI_ATTR_OKEY		 (1 << 2)
 #define IPVTI_ATTR_LOCAL	 (1 << 3)
 #define IPVTI_ATTR_REMOTE	 (1 << 4)
+#define IPVTI_ATTR_FWMARK	 (1 << 5)
 
 struct ipvti_info
 {
@@ -39,6 +45,7 @@ struct ipvti_info
 	uint32_t   okey;
 	uint32_t   local;
 	uint32_t   remote;
+	uint32_t   fwmark;
 	uint32_t   ipvti_mask;
 };
 
@@ -48,6 +55,7 @@ static	struct nla_policy ipvti_policy[IFLA_VTI_MAX + 1] = {
 	[IFLA_VTI_OKEY]     = { .type = NLA_U32 },
 	[IFLA_VTI_LOCAL]    = { .type = NLA_U32 },
 	[IFLA_VTI_REMOTE]   = { .type = NLA_U32 },
+	[IFLA_VTI_FWMARK]   = { .type = NLA_U32 },
 };
 
 static int ipvti_alloc(struct rtnl_link *link)
@@ -111,6 +119,11 @@ static int ipvti_parse(struct rtnl_link *link, struct nlattr *data,
 		ipvti->ipvti_mask |= IPVTI_ATTR_REMOTE;
 	}
 
+	if (tb[IFLA_VTI_FWMARK]) {
+		ipvti->fwmark = nla_get_u32(tb[IFLA_VTI_FWMARK]);
+		ipvti->ipvti_mask |= IPVTI_ATTR_FWMARK;
+	}
+
 	err = 0;
 
 errout:
@@ -132,7 +145,7 @@ static int ipvti_put_attrs(struct nl_msg *msg, struct rtnl_link *link)
 	if (ipvti->ipvti_mask & IPVTI_ATTR_IKEY)
 		NLA_PUT_U32(msg, IFLA_VTI_IKEY, ipvti->ikey);
 
-	if (ipvti->ipvti_mask & IFLA_VTI_IKEY)
+	if (ipvti->ipvti_mask & IPVTI_ATTR_OKEY)
 		NLA_PUT_U32(msg, IFLA_VTI_OKEY, ipvti->okey);
 
 	if (ipvti->ipvti_mask & IPVTI_ATTR_LOCAL)
@@ -140,6 +153,9 @@ static int ipvti_put_attrs(struct nl_msg *msg, struct rtnl_link *link)
 
 	if (ipvti->ipvti_mask & IPVTI_ATTR_REMOTE)
 		NLA_PUT_U32(msg, IFLA_VTI_REMOTE, ipvti->remote);
+
+	if (ipvti->ipvti_mask & IPVTI_ATTR_FWMARK)
+		NLA_PUT_U32(msg, IFLA_VTI_FWMARK, ipvti->fwmark);
 
 	nla_nest_end(msg, data);
 
@@ -164,10 +180,12 @@ static void ipvti_dump_line(struct rtnl_link *link, struct nl_dump_params *p)
 static void ipvti_dump_details(struct rtnl_link *link, struct nl_dump_params *p)
 {
 	struct ipvti_info *ipvti = link->l_info;
-	char *name, addr[INET_ADDRSTRLEN];
-	struct rtnl_link *parent;
+	char addr[INET_ADDRSTRLEN];
 
 	if (ipvti->ipvti_mask & IPVTI_ATTR_LINK) {
+		_nl_auto_rtnl_link struct rtnl_link *parent = NULL;
+		char *name;
+
 		nl_dump(p, "      link ");
 
 		name = NULL;
@@ -193,18 +211,19 @@ static void ipvti_dump_details(struct rtnl_link *link, struct nl_dump_params *p)
 
 	if (ipvti->ipvti_mask & IPVTI_ATTR_LOCAL) {
 		nl_dump(p, "      local ");
-		if(inet_ntop(AF_INET, &ipvti->local, addr, sizeof(addr)))
-			nl_dump_line(p, "%s\n", addr);
-		else
-			nl_dump_line(p, "%#x\n", ntohs(ipvti->local));
+		_nl_inet_ntop4(ipvti->local, addr);
+		nl_dump_line(p, "%s\n", addr);
 	}
 
 	if (ipvti->ipvti_mask & IPVTI_ATTR_REMOTE) {
 		nl_dump(p, "      remote ");
-		if(inet_ntop(AF_INET, &ipvti->remote, addr, sizeof(addr)))
-			nl_dump_line(p, "%s\n", addr);
-		else
-			nl_dump_line(p, "%#x\n", ntohs(ipvti->remote));
+		_nl_inet_ntop4(ipvti->remote, addr);
+		nl_dump_line(p, "%s\n", addr);
+	}
+
+	if (ipvti->ipvti_mask & IPVTI_ATTR_FWMARK) {
+		nl_dump(p, "      fwmark ");
+		nl_dump_line(p, "%x\n", ipvti->fwmark);
 	}
 }
 
@@ -244,7 +263,7 @@ static struct rtnl_link_info_ops ipvti_info_ops = {
 
 #define IS_IPVTI_LINK_ASSERT(link)                                          \
         if ((link)->l_info_ops != &ipvti_info_ops) {                        \
-                APPBUG("Link is not a ipvti link. set type \vti\" first."); \
+                APPBUG("Link is not a ipvti link. set type \"vti\" first.");\
                 return -NLE_OPNOTSUPP;                                      \
         }
 
@@ -471,12 +490,52 @@ uint32_t rtnl_link_ipvti_get_remote(struct rtnl_link *link)
 	return ipvti->remote;
 }
 
-static void __init ipvti_init(void)
+/**
+ * Set IPVTI tunnel fwmark
+ * @arg link            Link object
+ * @arg fwmark          fwmark
+ *
+ * @return 0 on success or a negative error code
+ */
+int rtnl_link_ipvti_set_fwmark(struct rtnl_link *link, uint32_t fwmark)
+{
+	struct ipvti_info *ipvti = link->l_info;
+
+	IS_IPVTI_LINK_ASSERT(link);
+
+	ipvti->fwmark = fwmark;
+	ipvti->ipvti_mask |= IPVTI_ATTR_FWMARK;
+
+	return 0;
+}
+
+/**
+ * Get IPVTI tunnel fwmark
+ * @arg link            Link object
+ * @arg fwmark          addr to fill in with the fwmark
+ *
+ * @return 0 on success or a negative error code
+ */
+int rtnl_link_ipvti_get_fwmark(struct rtnl_link *link, uint32_t *fwmark)
+{
+	struct ipvti_info *ipvti = link->l_info;
+
+	IS_IPVTI_LINK_ASSERT(link);
+
+	if (!(ipvti->ipvti_mask & IPVTI_ATTR_FWMARK))
+		return -NLE_NOATTR;
+
+	*fwmark = ipvti->fwmark;
+
+	return 0;
+}
+
+static void _nl_init ipvti_init(void)
 {
 	rtnl_link_register_info(&ipvti_info_ops);
 }
 
-static void __exit ipvti_exit(void)
+static void _nl_exit ipvti_exit(void)
 {
 	rtnl_link_unregister_info(&ipvti_info_ops);
 }

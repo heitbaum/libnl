@@ -80,6 +80,10 @@ extern int			nl_cache_resync(struct nl_sock *,
 						struct nl_cache *,
 						change_func_t,
 						void *);
+extern int			nl_cache_resync_v2(struct nl_sock *,
+						   struct nl_cache *,
+						   change_func_v2_t,
+						   void *);
 extern int			nl_cache_include(struct nl_cache *,
 						 struct nl_object *,
 						 change_func_t,
@@ -140,12 +144,16 @@ extern struct nl_cache *	__nl_cache_mngt_require(const char *);
 
 struct nl_cache_mngr;
 
-#define NL_AUTO_PROVIDE		1
-#define NL_ALLOCATED_SOCK	2  /* For internal use only, do not use */
+#define NL_AUTO_PROVIDE		    1
+#define NL_ALLOCATED_SOCK	    2  /* For internal use only, do not use */
 
 extern int			nl_cache_mngr_alloc(struct nl_sock *,
 						    int, int,
 						    struct nl_cache_mngr **);
+extern int			nl_cache_mngr_alloc_ex(struct nl_sock *,
+						       struct nl_sock *,
+						       int, int,
+						       struct nl_cache_mngr **);
 extern int			nl_cache_mngr_add(struct nl_cache_mngr *,
 						  const char *,
 						  change_func_t,

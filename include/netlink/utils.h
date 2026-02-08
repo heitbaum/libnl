@@ -13,6 +13,12 @@
 extern "C" {
 #endif
 
+#if defined(__GNUC__) && __GNUC__ > 5
+#define _nl_attribute_printf(a, b) __attribute__((__format__(printf, a, b)))
+#else
+#define _nl_attribute_printf(a, b)
+#endif
+
 /**
  * @name Probability Constants
  * @{
@@ -70,8 +76,8 @@ extern int	nl_str2ip_proto(const char *);
 
 /* Dumping helpers */
 extern void	nl_new_line(struct nl_dump_params *);
-extern void	nl_dump(struct nl_dump_params *, const char *, ...);
-extern void	nl_dump_line(struct nl_dump_params *, const char *, ...);
+extern void	nl_dump(struct nl_dump_params *, const char *, ...) _nl_attribute_printf(2, 3);
+extern void	nl_dump_line(struct nl_dump_params *, const char *, ...) _nl_attribute_printf(2, 3);
 
 enum {
 	NL_CAPABILITY_NONE,
@@ -300,6 +306,73 @@ enum {
 	 */
 	NL_CAPABILITY_NL_OBJECT_IDENTICAL_PARTIAL = 31,
 #define NL_CAPABILITY_NL_OBJECT_IDENTICAL_PARTIAL NL_CAPABILITY_NL_OBJECT_IDENTICAL_PARTIAL
+
+	/**
+	 * The library version is libnl3 3.6.0 or newer. This capability should never be backported.
+	 */
+	NL_CAPABILITY_VERSION_3_6_0 = 32,
+#define NL_CAPABILITY_VERSION_3_6_0 NL_CAPABILITY_VERSION_3_6_0
+
+	/**
+	 * The library version is libnl3 3.7.0 or newer. This capability should never be backported.
+	 */
+	NL_CAPABILITY_VERSION_3_7_0 = 33,
+#define NL_CAPABILITY_VERSION_3_7_0 NL_CAPABILITY_VERSION_3_7_0
+
+	/**
+	 * The library version is libnl3 3.8.0 or newer. This capability should never be backported.
+	 */
+	NL_CAPABILITY_VERSION_3_8_0 = 34,
+#define NL_CAPABILITY_VERSION_3_8_0 NL_CAPABILITY_VERSION_3_8_0
+
+	/**
+	 * The library version is libnl3 3.9.0 or newer. This capability should never be backported.
+	 */
+	NL_CAPABILITY_VERSION_3_9_0 = 35,
+#define NL_CAPABILITY_VERSION_3_9_0 NL_CAPABILITY_VERSION_3_9_0
+
+	/**
+	 * The library version is libnl3 3.10.0 or newer. This capability should never be backported.
+	 */
+	NL_CAPABILITY_VERSION_3_10_0 = 36,
+#define NL_CAPABILITY_VERSION_3_10_0 NL_CAPABILITY_VERSION_3_10_0
+
+	/**
+	 * The library version is libnl3 3.11.0 or newer. This capability should never be backported.
+	 */
+	NL_CAPABILITY_VERSION_3_11_0 = 37,
+#define NL_CAPABILITY_VERSION_3_11_0 NL_CAPABILITY_VERSION_3_11_0
+
+	/**
+	 * The library version is libnl3 3.12.0 or newer. This capability should never be backported.
+	 */
+	NL_CAPABILITY_VERSION_3_12_0 = 38,
+#define NL_CAPABILITY_VERSION_3_12_0 NL_CAPABILITY_VERSION_3_12_0
+
+	/**
+	 * The library version is libnl3 3.13.0 or newer. This capability should never be backported.
+	 */
+	NL_CAPABILITY_VERSION_3_13_0 = 39,
+#define NL_CAPABILITY_VERSION_3_13_0 NL_CAPABILITY_VERSION_3_13_0
+
+	/**
+	 * The library version is libnl3 3.14.0 or newer. This capability should never be backported.
+	 */
+	NL_CAPABILITY_VERSION_3_14_0 = 40,
+#define NL_CAPABILITY_VERSION_3_14_0 NL_CAPABILITY_VERSION_3_14_0
+
+	/**
+	 * Fixes parsing bonding properties miimon, hashing_type, and
+	 * min_links from netlink.
+	 */
+	NL_CAPABILITY_ROUTE_FIX_PARSE_BONDING = 41,
+#define NL_CAPABILITY_ROUTE_FIX_PARSE_BONDING NL_CAPABILITY_ROUTE_FIX_PARSE_BONDING
+
+	/**
+	 * The library version is libnl3 3.15.0 or newer. This capability should never be backported.
+	 */
+	NL_CAPABILITY_VERSION_3_15_0 = 42,
+#define NL_CAPABILITY_VERSION_3_15_0 NL_CAPABILITY_VERSION_3_15_0
 
 	__NL_CAPABILITY_MAX,
 	NL_CAPABILITY_MAX = (__NL_CAPABILITY_MAX - 1),

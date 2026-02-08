@@ -43,13 +43,20 @@
  * ~~~~
  */
 
-#include <netlink-private/netlink.h>
-#include <netlink-private/utils.h>
+#include "nl-default.h"
+
 #include <netlink/netlink.h>
 #include <netlink/cache.h>
 #include <netlink/object.h>
 #include <netlink/hashtable.h>
 #include <netlink/utils.h>
+
+#include "nl-core.h"
+#include "nl-priv-dynamic-core/nl-core.h"
+#include "nl-priv-dynamic-core/object-api.h"
+#include "nl-priv-dynamic-core/cache-api.h"
+#include "hashtable-api.h"
+#include "nl-aux-core/nl-core.h"
 
 /**
  * @name Access Functions
@@ -194,14 +201,7 @@ struct nl_cache *nl_cache_alloc(struct nl_cache_ops *ops)
 	 * cache objects for faster lookups
 	 */
 	if (ops->co_obj_ops->oo_keygen) {
-		int hashtable_size;
-
-		if (ops->co_hash_size)
-			hashtable_size = ops->co_hash_size;
-		else
-			hashtable_size = NL_MAX_HASH_ENTRIES;
-
-		cache->hashtable = nl_hash_table_alloc(hashtable_size);
+		cache->hashtable = nl_rhash_table_alloc();
 	}
 
 	NL_DBG(2, "Allocated cache %p <%s>.\n", cache, nl_cache_name(cache));
@@ -373,7 +373,7 @@ static void __nl_cache_free(struct nl_cache *cache)
 	nl_cache_clear(cache);
 
 	if (cache->hashtable)
-		nl_hash_table_free(cache->hashtable);
+		nl_rhash_table_free(cache->hashtable);
 
 	NL_DBG(2, "Freeing cache %p <%s>...\n", cache, nl_cache_name(cache));
 	free(cache);
@@ -433,7 +433,7 @@ static int __cache_add(struct nl_cache *cache, struct nl_object *obj)
 	obj->ce_cache = cache;
 
 	if (cache->hashtable) {
-		ret = nl_hash_table_add(cache->hashtable, obj);
+		ret = nl_rhash_table_add(cache->hashtable, obj);
 		if (ret < 0) {
 			obj->ce_cache = NULL;
 			return ret;
@@ -552,7 +552,7 @@ void nl_cache_remove(struct nl_object *obj)
 		return;
 
 	if (cache->hashtable) {
-		ret = nl_hash_table_del(cache->hashtable, obj);
+		ret = nl_rhash_table_del(cache->hashtable, obj);
 		if (ret < 0)
 			NL_DBG(2, "Failed to delete %p from cache %p <%s>.\n",
 			       obj, cache, nl_cache_name(cache));
@@ -708,17 +708,14 @@ static int __cache_pickup(struct nl_sock *sk, struct nl_cache *cache,
 static int pickup_checkdup_cb(struct nl_object *c, struct nl_parser_param *p)
 {
 	struct nl_cache *cache = (struct nl_cache *)p->pp_arg;
-	struct nl_object *old;
+	_nl_auto_nl_object struct nl_object *old = NULL;
 
 	old = nl_cache_search(cache, c);
 	if (old) {
-		if (nl_object_update(old, c) == 0) {
-			nl_object_put(old);
+		if (nl_object_update(old, c) == 0)
 			return 0;
-		}
 
 		nl_cache_remove(old);
-		nl_object_put(old);
 	}
 
 	return nl_cache_add(cache, c);
@@ -751,7 +748,10 @@ static int __nl_cache_pickup(struct nl_sock *sk, struct nl_cache *cache,
  * @arg cache		Cache to put items into.
  *
  * Waits for netlink messages to arrive, parses them and puts them into
- * the specified cache.
+ * the specified cache. If an old object with same key attributes is
+ * present in the cache, it is replaced with the new object.
+ * If the old object type supports an update operation, an update is
+ * attempted before a replace.
  *
  * @return 0 on success or a negative error code.
  */
@@ -766,10 +766,7 @@ int nl_cache_pickup_checkdup(struct nl_sock *sk, struct nl_cache *cache)
  * @arg cache		Cache to put items into.
  *
  * Waits for netlink messages to arrive, parses them and puts them into
- * the specified cache. If an old object with same key attributes is
- * present in the cache, it is replaced with the new object.
- * If the old object type supports an update operation, an update is
- * attempted before a replace.
+ * the specified cache.
  *
  * @return 0 on success or a negative error code.
  */
@@ -782,8 +779,8 @@ static int cache_include(struct nl_cache *cache, struct nl_object *obj,
 			 struct nl_msgtype *type, change_func_t cb,
 			 change_func_v2_t cb_v2, void *data)
 {
-	struct nl_object *old;
-	struct nl_object *clone = NULL;
+	_nl_auto_nl_object struct nl_object *old = NULL;
+	_nl_auto_nl_object struct nl_object *clone = NULL;
 	uint64_t diff = 0;
 
 	switch (type->mt_act) {
@@ -802,16 +799,12 @@ static int cache_include(struct nl_cache *cache, struct nl_object *obj,
 			 */
 			if (nl_object_update(old, obj) == 0) {
 				if (cb_v2) {
-					cb_v2(cache, clone, obj, diff,
+					cb_v2(cache, clone, old, diff,
 					      NL_ACT_CHANGE, data);
-					nl_object_put(clone);
 				} else if (cb)
 					cb(cache, old, NL_ACT_CHANGE, data);
-				nl_object_put(old);
 				return 0;
 			}
-			nl_object_put(clone);
-
 			nl_cache_remove(old);
 			if (type->mt_act == NL_ACT_DEL) {
 				if (cb_v2)
@@ -819,7 +812,6 @@ static int cache_include(struct nl_cache *cache, struct nl_object *obj,
 					      data);
 				else if (cb)
 					cb(cache, old, NL_ACT_DEL, data);
-				nl_object_put(old);
 			}
 		}
 
@@ -841,7 +833,6 @@ static int cache_include(struct nl_cache *cache, struct nl_object *obj,
 				} else if (diff && cb)
 					cb(cache, obj, NL_ACT_CHANGE, data);
 
-				nl_object_put(old);
 			}
 		}
 		break;
@@ -905,14 +896,16 @@ static int resync_cb(struct nl_object *c, struct nl_parser_param *p)
 					ca->ca_change_data);
 }
 
-int nl_cache_resync(struct nl_sock *sk, struct nl_cache *cache,
-		    change_func_t change_cb, void *data)
+static int cache_resync(struct nl_sock *sk, struct nl_cache *cache,
+			change_func_t change_cb, change_func_v2_t change_cb_v2,
+			void *data)
 {
 	struct nl_object *obj, *next;
 	struct nl_af_group *grp;
 	struct nl_cache_assoc ca = {
 		.ca_cache = cache,
 		.ca_change = change_cb,
+		.ca_change_v2 = change_cb_v2,
 		.ca_change_data = data,
 	};
 	struct nl_parser_param p = {
@@ -957,6 +950,9 @@ restart:
 			nl_cache_remove(obj);
 			if (change_cb)
 				change_cb(cache, obj, NL_ACT_DEL, data);
+			else if (change_cb_v2)
+				change_cb_v2(cache, obj, NULL, 0, NL_ACT_DEL,
+					     data);
 			nl_object_put(obj);
 		}
 	}
@@ -966,6 +962,18 @@ restart:
 	err = 0;
 errout:
 	return err;
+}
+
+int nl_cache_resync(struct nl_sock *sk, struct nl_cache *cache,
+		    change_func_t change_cb, void *data)
+{
+	return cache_resync(sk, cache, change_cb, NULL, data);
+}
+
+int nl_cache_resync_v2(struct nl_sock *sk, struct nl_cache *cache,
+		    change_func_v2_t change_cb_v2, void *data)
+{
+	return cache_resync(sk, cache, NULL, change_cb_v2, data);
 }
 
 /** @} */
@@ -1081,7 +1089,7 @@ static struct nl_object *__cache_fast_lookup(struct nl_cache *cache,
 {
 	struct nl_object *obj;
 
-	obj = nl_hash_table_lookup(cache->hashtable, needle);
+	obj = nl_rhash_table_lookup(cache->hashtable, needle);
 	if (obj) {
 		nl_object_get(obj);
 		return obj;

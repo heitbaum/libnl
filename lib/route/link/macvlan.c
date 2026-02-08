@@ -17,17 +17,22 @@
  * @{
  */
 
-#include <netlink-private/netlink.h>
+#include "nl-default.h"
+
+#include <linux/if_link.h>
+
+#include <linux/ethtool.h>
+
 #include <netlink/netlink.h>
 #include <netlink/attr.h>
 #include <netlink/utils.h>
 #include <netlink/object.h>
 #include <netlink/route/rtnl.h>
-#include <netlink-private/route/link/api.h>
 #include <netlink/route/link/macvlan.h>
 #include <netlink/route/link/macvtap.h>
 
-#include <linux/if_link.h>
+#include "nl-route.h"
+#include "link-api.h"
 
 /** @cond SKIP */
 #define MACVLAN_HAS_MODE        (1<<0)
@@ -117,6 +122,10 @@ static int macvlan_parse(struct rtnl_link *link, struct nlattr *data,
 
 			mvi->mvi_macaddr = calloc(mvi->mvi_maccount,
 			                          sizeof(*(mvi->mvi_macaddr)));
+			if (mvi->mvi_macaddr == NULL) {
+				err = -NLE_NOMEM;
+				goto errout;
+			}
 
 			i = 0;
 			for (; nla_ok(nla, len); nla = nla_next(nla, &len)) {
@@ -216,7 +225,7 @@ static int macvlan_put_attrs(struct nl_msg *msg, struct rtnl_link *link)
 {
 	struct macvlan_info *mvi = link->l_info;
 	struct nlattr *data, *datamac = NULL;
-	int i, ret;
+	int ret;
 
 	if (!(data = nla_nest_start(msg, IFLA_INFO_DATA)))
 		return -NLE_MSGSIZE;
@@ -230,6 +239,8 @@ static int macvlan_put_attrs(struct nl_msg *msg, struct rtnl_link *link)
 		NLA_PUT_U16(msg, IFLA_MACVLAN_FLAGS, mvi->mvi_flags);
 
 	if (mvi->mvi_mask & MACVLAN_HAS_MACADDR) {
+		uint32_t i;
+
 		NLA_PUT_U32(msg, IFLA_MACVLAN_MACADDR_MODE, mvi->mvi_macmode);
 		datamac = nla_nest_start(msg, IFLA_MACVLAN_MACADDR_DATA);
 		if (!datamac)
@@ -303,12 +314,11 @@ static struct rtnl_link_info_ops macvtap_info_ops = {
 struct rtnl_link *rtnl_link_macvlan_alloc(void)
 {
 	struct rtnl_link *link;
-	int err;
 
 	if (!(link = rtnl_link_alloc()))
 		return NULL;
 
-	if ((err = rtnl_link_set_type(link, "macvlan")) < 0) {
+	if (rtnl_link_set_type(link, "macvlan") < 0) {
 		rtnl_link_put(link);
 		return NULL;
 	}
@@ -337,7 +347,6 @@ int rtnl_link_is_macvlan(struct rtnl_link *link)
 int rtnl_link_macvlan_set_mode(struct rtnl_link *link, uint32_t mode)
 {
 	struct macvlan_info *mvi = link->l_info;
-	int i;
 
 	IS_MACVLAN_LINK_ASSERT(link);
 
@@ -345,6 +354,8 @@ int rtnl_link_macvlan_set_mode(struct rtnl_link *link, uint32_t mode)
 	mvi->mvi_mask |= MACVLAN_HAS_MODE;
 
 	if (mode != MACVLAN_MODE_SOURCE) {
+		uint32_t i;
+
 		for (i = 0; i < mvi->mvi_maccount; i++)
 			nl_addr_put(mvi->mvi_macaddr[i]);
 		free(mvi->mvi_macaddr);
@@ -649,12 +660,11 @@ int rtnl_link_macvlan_del_macaddr(struct rtnl_link *link, struct nl_addr *addr)
 struct rtnl_link *rtnl_link_macvtap_alloc(void)
 {
 	struct rtnl_link *link;
-	int err;
 
 	if (!(link = rtnl_link_alloc()))
 		return NULL;
 
-	if ((err = rtnl_link_set_type(link, "macvtap")) < 0) {
+	if (rtnl_link_set_type(link, "macvtap") < 0) {
 		rtnl_link_put(link);
 		return NULL;
 	}
@@ -853,13 +863,13 @@ int rtnl_link_macvtap_str2mode(const char *name)
 
 /** @} */
 
-static void __init macvlan_init(void)
+static void _nl_init macvlan_init(void)
 {
 	rtnl_link_register_info(&macvlan_info_ops);
 	rtnl_link_register_info(&macvtap_info_ops);
 }
 
-static void __exit macvlan_exit(void)
+static void _nl_exit macvlan_exit(void)
 {
 	rtnl_link_unregister_info(&macvlan_info_ops);
 	rtnl_link_unregister_info(&macvtap_info_ops);
